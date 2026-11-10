@@ -27,9 +27,9 @@ wrong, change the code, and try again, with nobody at the pad.
 tools/ps5loop.py load                  # once per console boot
 tools/ps5loop.py open                  # connect the virtual controller
 tools/ps5loop.py seq l1 wait:1000 cross wait:14000    # Games tab, launch
-tools/ps5loop.py grab                  # the title's frame -> captures/shot-<time>.png
+tools/ps5loop.py frame                 # the title's frame -> captures/capture-<time>.png
 tools/ps5loop.py seq down down cross:300 wait:1000
-tools/ps5loop.py shot                  # the whole screen, for the home screen and dialogs
+tools/ps5loop.py screenshot            # the whole screen, for the home screen and dialogs
 tools/ps5loop.py close
 ```
 
@@ -40,12 +40,12 @@ home screen, every step checked from a picture.
 > For homebrew development on a console you own. It is tested on **firmware
 > 12.20 and 13.60**; the calls it relies on are undocumented and may differ
 > elsewhere. `payload/main.c` reports what every step returned, and `ps5loop.py
-> klog` dumps the kernel log, so that another firmware can be brought up.
+> kernel-log` dumps the kernel log, so that another firmware can be brought up.
 
 ## For agents
 
 `AGENTS.md` is the operating guide: the loop, which picture to take when, the
-rules that keep the console safe, and how to give a new title the `grab` hook
+rules that keep the console safe, and how to give a new title the `frame` hook
 (a few lines). `CLAUDE.md` includes it, so Claude Code reads it on entering the
 folder. Point any other agent at it first.
 
@@ -77,9 +77,11 @@ tools. The pad can launch anything from the home screen without them.
 | `press BUTTONS [--ms N]` | press and release: `cross`, `l1+r1` |
 | `hold BUTTONS [--lx N ...]` | hold buttons, sticks (0-255) and triggers until the next `hold` or `release` |
 | `seq STEPS...` | presses and waits in order: `down cross:300 wait:1000` |
-| `grab [FILE]` | the running title's frame (`--title`, from `titles.json`) |
-| `shot [FILE]` | the whole screen, through the console's screenshot |
-| `klog [MS] [FILE]` | dump the console's kernel log (a bring-up aid) |
+| `frame [FILE]` | the running title's frame (`--title`, from `titles.json`) |
+| `screenshot [FILE]` | the whole screen, through the console's screenshot |
+| `kernel-log [MS] [FILE]` | dump the console's kernel log (a bring-up aid) |
+| `delete-capture PATH` | remove a leftover capture through the gallery |
+| `doctor` | check the host, payload, loader and capture tools |
 | `close` | remove the pad |
 
 `tools/ps5loop.py --help` lists the rest; `payload/main.c` documents the wire
@@ -90,12 +92,12 @@ protocol (one text command per connection, port 9112).
 - **Input** is the system's virtual pad device (`scePadVirtualDevice*`, what
   Remote Play uses). The payload holds a state and inserts it every 8 ms;
   presses are timed on the console, not across the network.
-- **A title's frame** (`grab`) comes from the title. The payload creates a
+- **A title's frame** (`frame`) comes from the title. The payload creates a
   request file in the title's folder; the title removes it and writes a picture
   of its next frame; the payload sends that and deletes it. About 1 s end to end
   at 3840x2160. A title needs a hook of a few lines (`AGENTS.md`, "Giving a
-  title grab"), and an entry in `titles.json`.
-- **The whole screen** (`shot`) is the console's own screenshot: the payload
+  title a frame"), and an entry in `titles.json`.
+- **The whole screen** (`screenshot`) is the console's own screenshot: the payload
   holds the virtual Create button for 1.2 s, waits for the new file under
   `/user/av_contents/photo`, sends it, and deletes it through
   `sceContentDeleteByPath` (libSceContentDelete), as the gallery's own Delete
@@ -130,17 +132,17 @@ Measured live. Firmware 12.20 and 13.60 behave the same unless noted.
 - **Firmware 12.20**: the pad path above is identical, confirmed live (`add`
   `0x803b0006`, device id = `InsertData` handle, `bind` 0, input driving a
   homebrew launcher once the real pad is evicted). This console runs no klog
-  server, so the payload reads `/dev/klog`; `shot`'s Create hold and its
+  server, so the payload reads `/dev/klog`; `screenshot`'s Create hold and its
   `sceContentDeleteByPath` cleanup both work. The direct screenshot service
-  (`capture`) answers `0x80be000a`, so as on 13.60 only the Create hold works.
-  Use `ps5loop.py klog` to read the log on a console whose server is absent.
+  (`direct-screenshot`) answers `0x80be000a`, so as on 13.60 only the Create
+  hold works. Use `ps5loop.py kernel-log` to read the log where the server is absent.
 
 ## Limits
 
 - Pictures are stills, not video. Nothing known reads the composited display
   from a payload.
-- `shot` takes about 3 s: Create held for less than 1.2 s opens the Create menu
-  instead.
+- `screenshot` takes about 3 s: Create held for less than 1.2 s opens the Create
+  menu instead.
 - While the pad drives a title, the real controller is disconnected
   (`open --beside` keeps it, for the home screen only).
 - The pad's device id, and the controller table `open` evicts from, are read

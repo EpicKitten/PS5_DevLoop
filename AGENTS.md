@@ -10,8 +10,8 @@ measured.
 tools/ps5loop.py load          # once per console boot (the ELF loader must be up, port 9021)
 tools/ps5loop.py open          # the virtual pad; disconnects a real controller (PS reconnects it)
 tools/ps5loop.py seq down down cross:300 wait:1000
-tools/ps5loop.py grab          # in a title: its own frame
-tools/ps5loop.py shot          # anywhere else: the console's screenshot
+tools/ps5loop.py frame         # in a title: its own frame
+tools/ps5loop.py screenshot    # anywhere else: the console's screenshot
 tools/ps5loop.py close
 ```
 
@@ -21,24 +21,25 @@ after launch before it reads the pad.
 
 ## Which picture
 
-| | `grab` | `shot` |
+| | `frame` | `screenshot` |
 | --- | --- | --- |
 | Shows | what the running title drew | the whole screen: home, dialogs, any title |
 | Takes | about 1 s | about 3 s |
 | Needs | the hook in the title, and a line in `titles.json` | the pad open |
 | Leaves on the console | nothing | nothing (the capture is deleted through the system) |
 
-**In a title, use `grab`.** Use `shot` for the home screen and system dialogs, or
-for a title that has no hook yet. To learn whether a title is still running, ask
-the launcher payload you use (PS5_Vulkan's ps5vkctl: `status`), not a picture.
+**In a title, use `frame`.** Use `screenshot` for the home screen and system
+dialogs, or for a title that has no hook yet. To learn whether a title is still
+running, ask the launcher payload you use (PS5_Vulkan's ps5vkctl: `status`), not
+a picture.
 
 **When you start work on a title that `titles.json` does not list, give it the
 hook first** (below). It is a few lines, and every look at the title afterwards
-is three times quicker. Do not settle for `shot` in a title you can build.
+is three times quicker. Do not settle for `screenshot` in a title you can build.
 
-## Giving a title grab
+## Giving a title a frame
 
-The contract, which the payload's `grab REQUEST FOLDER` drives:
+The contract, which the payload's `frame REQUEST FOLDER` drives:
 
 1. Once every few frames the title tries to remove a request file in its own
    folder, `/app0/devloop-shot`. Removing it is the check: one system call, which
@@ -80,7 +81,7 @@ Then add the title to `titles.json`:
 }
 ```
 
-and prove it: launch the title, `tools/ps5loop.py grab --title mytitle`, look at
+and prove it: launch the title, `tools/ps5loop.py frame --title mytitle`, look at
 the picture, and check the folder is empty afterwards.
 
 ## Rules
@@ -93,9 +94,11 @@ the picture, and check the folder is empty afterwards.
   user's first controller, so the real one is disconnected. Say so when you
   finish; `open --beside` keeps it, for the home screen only.
 - **Leave the console as you found it**: quit the title through its own menu,
-  `close` the pad. `shot` and `grab` clean up after themselves; `forget PATH`
-  deletes a capture properly (file, thumbnail and database row) if one is left.
+  `close` the pad. `screenshot` and `frame` clean up after themselves;
+  `delete-capture PATH` removes a capture properly (file, thumbnail and database
+  row) if one is left. Pass the path verbatim; a shell that rewrites absolute
+  paths (Git Bash on Windows) will mangle it, so quote or disable that first.
 - **Never edit `/system_data/priv/mms/av_content.db`** or delete files under
   `/user/av_contents` by hand: the gallery's database and its files go out of
-  step. `forget` asks the system to do it.
+  step. `delete-capture` asks the system to do it.
 - Never print the console's address: it lives in `PS5_HOST` or the ignored `.env`.

@@ -22,15 +22,16 @@
  *   pad bind DEVICE [USERID]  bring-up: bind a device id to a user by hand
  *   pad evict DEVICE          disconnect another controller, so that the
  *                             virtual pad is its user's first, the one titles read
- *   shots                     the newest files under the console's captures
- *   latest                    send the newest capture: a header line, then bytes
- *   shot [HOLD_MS]            hold Create (the console's "take screenshot"
+ *   list-captures             the newest files under the console's captures
+ *   latest-capture            send the newest capture: a header line, then bytes
+ *   screenshot [HOLD_MS]      hold Create (the console's "take screenshot"
  *                             shortcut), wait for the new file, send it, and
  *                             delete it from the console's gallery
- *   forget PATH               delete a capture as the gallery does
- *   capture [TYPE]            bring-up: ask the screenshot service directly
- *                             (it never answers a payload on firmware 13.60)
- *   grab REQUEST FOLDER [MS]  ask a running title for its frame: create the
+ *   delete-capture PATH       delete a capture as the gallery does
+ *   kernel-log [MS]           dump the kernel log for a while (bring-up)
+ *   direct-screenshot [TYPE]  bring-up: ask the screenshot service directly
+ *                             (it answers no payload on firmware 12.20 or 13.60)
+ *   frame REQUEST FOLDER [MS] ask a running title for its frame: create the
  *                             file REQUEST, which the title takes as "write a
  *                             picture into FOLDER", send the picture, delete it
  *   quit                      remove the pad and leave the console
@@ -60,7 +61,7 @@
  * console wants Create held. The picture is then deleted through
  * libSceContentDelete, which removes it as the gallery's own Delete does.
  *
- * A title that can write its own frame is asked instead ("grab"): it is quicker
+ * A title that can write its own frame is asked instead ("frame"): it is quicker
  * by an order of magnitude and leaves nothing behind, but shows only what the
  * title drew. The title's side is a file it looks for and removes
  * (AGENTS.md, "Giving a title grab").
@@ -718,7 +719,7 @@ static void grab(int client, const char *request, const char *folder, int wait_m
     const int file = open(request, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (file < 0)
     {
-        reply(client, "err grab %s: %s", request, strerror(errno));
+        reply(client, "err frame %s: %s", request, strerror(errno));
         return;
     }
     close(file);
@@ -743,7 +744,7 @@ static void grab(int client, const char *request, const char *folder, int wait_m
     }
     // A request nobody took must not wait for the next launch by hand.
     const bool taken = unlink(request) != 0;
-    reply(client, "err grab no picture in %s within %d ms (the title %s the request)", folder,
+    reply(client, "err frame no picture in %s within %d ms (the title %s the request)", folder,
           wait_ms, taken ? "took" : "never took");
 }
 
@@ -911,14 +912,15 @@ static bool direct_shot(int client, int type, int wait_ms, char *report, size_t 
 
 // Take the console's own screenshot: hold Create as a person would, wait for a
 // picture newer than the press whose size has stopped growing, send it, and
-// delete it from the console. (Asking the screenshot service instead, "capture",
-// never answers a payload.)
+// delete it from the console. (Asking the screenshot service instead,
+// "direct-screenshot", never answers a payload.)
 static void take_shot(int client, int hold_ms)
 {
     char report[PS5LOOP_LINE - 128] = {0};
     if (!g_pad.open)
     {
-        reply(client, "err shot needs the pad: pad open first (latest sends the newest capture)");
+        reply(client,
+              "err screenshot needs the pad: pad open first (latest-capture sends the newest one)");
         return;
     }
     capture_libraries(report, sizeof(report));
@@ -942,7 +944,7 @@ static void take_shot(int client, int hold_ms)
         }
         last_size = after[0].size;
     }
-    reply(client, "err shot no new capture within %d ms (newest is still %s)", PS5LOOP_SHOT_WAIT_MS,
+    reply(client, "err screenshot no new capture within %d ms (newest is still %s)", PS5LOOP_SHOT_WAIT_MS,
           before[0].path[0] != '\0' ? before[0].path : "none");
 }
 
@@ -968,7 +970,7 @@ static int handle_command(int client, char *line)
         reply(client, "ok bye %s", report);
         return -1;
     }
-    if (strcmp(command, "shots") == 0)
+    if (strcmp(command, "list-captures") == 0)
     {
         capture_t newest[PS5LOOP_NEWEST];
         captures_newest(newest);
@@ -978,7 +980,7 @@ static int handle_command(int client, char *line)
         reply(client, "ok shots %s", report[0] != '\0' ? report : "none");
         return 0;
     }
-    if (strcmp(command, "latest") == 0)
+    if (strcmp(command, "latest-capture") == 0)
     {
         capture_t newest[PS5LOOP_NEWEST];
         captures_newest(newest);
@@ -988,25 +990,26 @@ static int handle_command(int client, char *line)
             send_file(client, &newest[0]);
         return 0;
     }
-    if (strcmp(command, "shot") == 0)
+    if (strcmp(command, "screenshot") == 0)
     {
         const char *const hold = strtok(NULL, " \t");
         const int hold_ms = hold != NULL ? atoi(hold) : PS5LOOP_CREATE_HOLD_MS;
         take_shot(client, hold_ms > 0 && hold_ms <= 5000 ? hold_ms : PS5LOOP_CREATE_HOLD_MS);
         return 0;
     }
-    if (strcmp(command, "forget") == 0)
+    if (strcmp(command, "delete-capture") == 0)
     {
         // Delete a capture as the gallery does: file, thumbnail, database row.
         const char *const path = strtok(NULL, " \t");
         capture_libraries(report, sizeof(report));
         if (path == NULL || strncmp(path, "/user/av_contents/", 18) != 0 || strstr(path, "..") != NULL)
-            reply(client, "err usage: forget /user/av_contents/...");
+            reply(client, "err usage: delete-capture /user/av_contents/... (got %s)",
+                  path != NULL ? path : "(none)");
         else
-            reply(client, "ok forget result=0x%08x %s", (uint32_t)capture_delete(path), path);
+            reply(client, "ok delete-capture result=0x%08x %s", (uint32_t)capture_delete(path), path);
         return 0;
     }
-    if (strcmp(command, "klog") == 0)
+    if (strcmp(command, "kernel-log") == 0)
     {
         // bring-up: dump the kernel log for a while, so another firmware's device
         // and controller lines can be read from the host (the format the device
@@ -1044,7 +1047,7 @@ static int handle_command(int client, char *line)
         free(buffer);
         return 0;
     }
-    if (strcmp(command, "capture") == 0)
+    if (strcmp(command, "direct-screenshot") == 0)
     {
         // bring-up: the screenshot service alone, with its type argument
         const char *const type = strtok(NULL, " \t");
@@ -1052,14 +1055,14 @@ static int handle_command(int client, char *line)
             reply(client, "err capture %s", report);
         return 0;
     }
-    if (strcmp(command, "grab") == 0)
+    if (strcmp(command, "frame") == 0)
     {
         const char *const request = strtok(NULL, " \t");
         const char *const folder = strtok(NULL, " \t");
         const char *const wait = strtok(NULL, " \t");
         const int wait_ms = wait != NULL ? atoi(wait) : 3000;
         if (request == NULL || folder == NULL || request[0] != '/' || folder[0] != '/')
-            reply(client, "err usage: grab /REQUEST/FILE /PICTURE/FOLDER [MS]");
+            reply(client, "err usage: frame /REQUEST/FILE /PICTURE/FOLDER [MS]");
         else
             grab(client, request, folder, wait_ms > 0 && wait_ms <= 30000 ? wait_ms : 3000);
         return 0;
