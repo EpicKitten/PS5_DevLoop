@@ -25,8 +25,9 @@
   .dot.bad { background: var(--hot); box-shadow: 0 0 12px var(--hot); }
   .meta { display: flex; flex-wrap: wrap; gap: 8px 22px; color: var(--muted); font-size: 13px; margin: 10px 2px 18px; }
   .meta b { color: var(--text); font-weight: 600; }
-  .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
-  @media (max-width: 680px) { .grid { grid-template-columns: 1fr; } }
+  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 14px; }
+  @media (max-width: 680px) { .grid { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 420px) { .grid { grid-template-columns: 1fr; } }
   .card {
     background: linear-gradient(180deg, var(--panel2), var(--panel));
     border: 1px solid var(--line); border-radius: 16px; padding: 18px 16px;
@@ -146,6 +147,15 @@
       <div class="big" id="mhz">—</div>
       <div class="unit">MHz</div>
     </div>
+    <div class="card">
+      <div class="label">Fan speed</div>
+      <svg class="gauge" viewBox="0 0 120 78" id="g-fan">
+        <path d="M10 62 A50 50 0 0 1 110 62" fill="none" stroke="#223049" stroke-width="10" stroke-linecap="round"/>
+        <path d="M10 62 A50 50 0 0 1 110 62" fill="none" stroke="var(--accent)" stroke-width="10"
+              stroke-linecap="round" class="arc" pathLength="100" stroke-dasharray="100" stroke-dashoffset="100"/>
+        <text x="60" y="58" text-anchor="middle" class="val" fill="currentColor">—<tspan class="unit">%</tspan></text>
+      </svg>
+    </div>
   </div>
 
   <div class="card sensors-card">
@@ -161,10 +171,18 @@
       <span class="label">Temperature history</span>
       <span class="legend">
         <span><i class="swatch" style="background:#46d1ff"></i>CPU</span>
-        <span><i class="swatch" style="background:#f2c14e"></i>SoC</span>
+        <span><i class="swatch" style="background:linear-gradient(90deg,#46d1a2,#f2c14e,#f2584e)"></i>SoC ×<span id="soc-lines">64</span></span>
       </span>
     </div>
     <canvas id="chart"></canvas>
+  </div>
+
+  <div class="card chart-card">
+    <div class="chart-head">
+      <span class="label">Fan speed history</span>
+      <span class="legend"><span><i class="swatch" style="background:#2e8bff"></i>Fan %</span></span>
+    </div>
+    <canvas id="fanchart"></canvas>
   </div>
 
   <!-- ================= control panel ================= -->
@@ -309,6 +327,14 @@
         <button onclick="run('fan')">Read duty</button>
         <input type="number" id="fan-t" value="60" min="30" max="90">
         <button onclick="run('fan set ' + val('fan-t'))">Set °C</button></div>
+      <div class="row"><label>Hold</label>
+        <span class="hint" style="margin:0">every</span>
+        <input type="number" id="fan-secs" value="7" min="1" max="3600">
+        <span class="hint" style="margin:0">s</span>
+        <button class="go" onclick="run('fan hold ' + val('fan-t') + ' ' + val('fan-secs'))">Hold °C</button>
+        <button onclick="run('fan hold off')">Stop</button>
+        <button onclick="run('fan hold')">Status</button></div>
+      <div class="hint">Set °C is one-shot — the system reverts it. Hold re-applies the threshold every few seconds so it sticks.</div>
       <div class="row"><label>Beeper</label>
         <input type="number" id="beep-p" value="1" min="1" max="9">
         <button onclick="run('beeper ' + val('beep-p'))">Beep</button>
@@ -376,7 +402,7 @@
 
 <script>
 const MAX = 120;                 // ~4 minutes of 2 s samples
-const hist = { cpu: [], soc: [] };
+const hist = { cpu: [], sensors: new Map(), fan: [] };   // sensors: id -> temp history; fan: duty %
 const zone = t => t == null ? "var(--cool)" : t >= 75 ? "var(--hot)" : t >= 58 ? "var(--warm)" : "var(--cool)";
 
 // DualSense button masks (match tools/ps5loop.py BUTTONS).
@@ -397,6 +423,20 @@ function setGauge(id, temp) {
   arc.setAttribute("stroke", zone(temp));
   g.style.color = zone(temp);
   text.firstChild.nodeValue = temp == null ? "—" : String(temp);
+}
+
+// Fan gauge: 0..100 %, accent-colored; null / negative (call unavailable) shows —.
+function setFanGauge(id, pct) {
+  const g = document.getElementById(id);
+  const arc = g.querySelector(".arc");
+  const text = g.querySelector(".val");
+  const known = pct != null && pct >= 0;
+  const frac = known ? Math.max(0, Math.min(1, pct / 100)) : 0;
+  arc.setAttribute("stroke-dashoffset", String(100 - frac * 100));
+  const col = known ? "var(--accent)" : "var(--muted)";
+  arc.setAttribute("stroke", col);
+  g.style.color = col;
+  text.firstChild.nodeValue = known ? String(pct) : "—";
 }
 
 const zoneClass = t => t >= 75 ? "hot" : t >= 58 ? "warm" : "";
@@ -432,18 +472,56 @@ function drawChart() {
     x.beginPath(); x.moveTo(pad, py(t)); x.lineTo(w - 8, py(t)); x.stroke();
     x.fillText(t + "°", 4, py(t) + 3);
   }
-  const line = (arr, color) => {
+  const line = (arr, color, width, alpha) => {
     if (!arr.length) return;
-    x.strokeStyle = color; x.lineWidth = 2; x.beginPath();
+    x.save();
+    x.globalAlpha = alpha == null ? 1 : alpha;
+    x.strokeStyle = color; x.lineWidth = width || 2; x.beginPath();
     const start = MAX - arr.length;
     arr.forEach((t, i) => {
       const X = px(start + i), Y = py(t);
       i ? x.lineTo(X, Y) : x.moveTo(X, Y);
     });
     x.stroke();
+    x.restore();
   };
-  line(hist.cpu, "#46d1ff");
-  line(hist.soc, "#f2c14e");
+  // every SoC sensor, thin and translucent, spread across the spectrum by id
+  const ids = [...hist.sensors.keys()].sort((a, b) => a - b);
+  ids.forEach((id, k) => {
+    line(hist.sensors.get(id), `hsl(${(k / Math.max(1, ids.length)) * 300}, 70%, 60%)`, 1, 0.55);
+  });
+  // CPU on top, bold
+  line(hist.cpu, "#46d1ff", 2, 1);
+}
+
+function drawFanChart() {
+  const c = document.getElementById("fanchart");
+  const dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  c.width = w * dpr; c.height = h * dpr;
+  const x = c.getContext("2d"); x.scale(dpr, dpr);
+  x.clearRect(0, 0, w, h);
+  const pad = 30, maxV = 100;
+  const px = i => pad + (w - pad - 8) * (i / (MAX - 1));
+  const py = v => (h - 18) - (h - 28) * (v / maxV);
+  x.strokeStyle = "#1e2a40"; x.fillStyle = "#6b7a92";
+  x.font = "11px sans-serif"; x.lineWidth = 1;
+  for (let v = 0; v <= maxV; v += 25) {
+    x.beginPath(); x.moveTo(pad, py(v)); x.lineTo(w - 8, py(v)); x.stroke();
+    x.fillText(v + "%", 4, py(v) + 3);
+  }
+  const arr = hist.fan;
+  if (!arr.length) return;
+  const start = MAX - arr.length;
+  // filled area under the line
+  x.beginPath();
+  arr.forEach((v, i) => { const X = px(start + i), Y = py(v); i ? x.lineTo(X, Y) : x.moveTo(X, Y); });
+  x.lineTo(px(start + arr.length - 1), py(0)); x.lineTo(px(start), py(0)); x.closePath();
+  x.globalAlpha = 0.12; x.fillStyle = "#2e8bff"; x.fill(); x.globalAlpha = 1;
+  // the line
+  x.strokeStyle = "#2e8bff"; x.lineWidth = 2; x.beginPath();
+  arr.forEach((v, i) => { const X = px(start + i), Y = py(v); i ? x.lineTo(X, Y) : x.moveTo(X, Y); });
+  x.stroke();
 }
 
 function status(ok, msg) {
@@ -466,10 +544,21 @@ async function poll() {
       d.socMaxId != null && d.socMaxId >= 0 ? "#" + d.socMaxId : "";
     setGauge("g-cpu", d.cpuC);
     setGauge("g-soc", socMax);
+    setFanGauge("g-fan", d.fanPct);
     renderSensors(d.socSensors);
     if (d.cpuC != null) { hist.cpu.push(d.cpuC); if (hist.cpu.length > MAX) hist.cpu.shift(); }
-    if (socMax != null) { hist.soc.push(socMax); if (hist.soc.length > MAX) hist.soc.shift(); }
+    if (Array.isArray(d.socSensors)) {
+      for (const s of d.socSensors) {
+        let arr = hist.sensors.get(s.id);
+        if (!arr) { arr = []; hist.sensors.set(s.id, arr); }
+        arr.push(s.c); if (arr.length > MAX) arr.shift();
+      }
+      const soc = document.getElementById("soc-lines");
+      if (soc) soc.textContent = hist.sensors.size;
+    }
+    if (d.fanPct != null && d.fanPct >= 0) { hist.fan.push(d.fanPct); if (hist.fan.length > MAX) hist.fan.shift(); }
     drawChart();
+    drawFanChart();
     status(true, "connected · " + new Date().toLocaleTimeString());
   } catch (e) {
     status(false, "disconnected (" + e.message + ")");
@@ -550,7 +639,7 @@ function getFile() {
 
 document.getElementById("clear").onclick = () => { out.textContent = ""; out.dataset.virgin = "1"; shot.innerHTML = ""; };
 
-window.addEventListener("resize", drawChart);
+window.addEventListener("resize", () => { drawChart(); drawFanChart(); });
 poll();
 setInterval(poll, 2000);
 </script>

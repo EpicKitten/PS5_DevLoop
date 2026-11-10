@@ -52,11 +52,12 @@
  *   uninstall TITLE_ID        uninstall a title
  *   power off|reboot|rest     power off, reboot, or enter rest mode
  *   notify TYPE MESSAGE       show a message: TYPE is toast or flyout
- *   hwinfo                    model, serial, cpu + all SoC temperatures, cpu clock
+ *   hwinfo                    model, serial, cpu + all SoC temps, cpu clock, fan %
  *   df                        free space per mounted volume
  *   led BWA|off|auto|breathe B W A [MS]|chase [MS]   the console indicator LED
  *   lightbar R G B            attempt the physical pad lightbar (shell owns it)
  *   fan [set TEMP]            read the fan duty, or set the threshold (30..90 C)
+ *   fan hold TEMP [SECS]      re-apply the threshold every SECS s (default 7); fan hold off
  *   beeper [PATTERN]|mute 0|1|vol 0..2   beep, mute, or set the beeper volume
  *   GET / , GET /api/hwinfo   a browser gets the live dashboard, hosted here
  *   GET /api/run?c=CMD        the dashboard runs any command above; the reply
@@ -1955,6 +1956,9 @@ int sceKernelGetHwSerialNumber(char *);
 long sceKernelGetCpuFrequency(void);
 int sceKernelGetCpuTemperature(int *);
 int sceKernelGetSocSensorTemperature(int, int *);
+// Current (not manual) fan duty: raw value, percent = raw/10. The /dev/icc_fan
+// GET_DUTY ioctl only reports the *manual* duty (0 in auto mode), so use this.
+int sceKernelGetCurrentFanDuty(uint16_t *, void *);
 
 // The SoC exposes many thermal sensors, not one: sceKernelGetSocSensorTemperature
 // answers for ids 0..63 (probed on 13.60; a few succeed on 12.20). Scan them all
@@ -1973,6 +1977,7 @@ typedef struct hwinfo
     int socMax;  // the hottest valid sensor
     int socMaxId;
     int socN;    // how many sensors answered plausibly
+    int fanPct;  // current fan duty 0..100, or -1 if the call is unavailable
     int socIds[HWINFO_SOC_SENSORS];
     int socVals[HWINFO_SOC_SENSORS];
 } hwinfo_t;
@@ -2007,6 +2012,18 @@ static void hwinfo_read(hwinfo_t *h)
             h->socMaxId = id;
         }
     }
+    h->fanPct = -1;
+    {
+        uint16_t raw = 0;
+        unsigned char scratch[64] = {0};
+        if (sceKernelGetCurrentFanDuty(&raw, scratch) == 0)
+        {
+            int p = raw / 10;
+            if (p > 100)
+                p = 100;
+            h->fanPct = p;
+        }
+    }
 }
 
 static void hwinfo(int client)
@@ -2014,8 +2031,9 @@ static void hwinfo(int client)
     hwinfo_t h;
     hwinfo_read(&h);
     reply(client,
-          "ok fw=0x%08x model=%s serial=%s cpuC=%d socC=%d socMax=%d socMaxId=%d socN=%d cpuMHz=%ld",
-          h.fw, h.model, h.serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz);
+          "ok fw=0x%08x model=%s serial=%s cpuC=%d socC=%d socMax=%d socMaxId=%d socN=%d cpuMHz=%ld "
+          "fanPct=%d",
+          h.fw, h.model, h.serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz, h.fanPct);
 }
 
 // The same reading as a JSON object, for the dashboard the console hosts. The
@@ -2032,8 +2050,9 @@ static char *hwinfo_json(void)
     json = text_append(json, &cap, &used,
                        "{\"ok\":true,\"fw\":\"0x%08x\",\"model\":\"%s\",\"serial\":\"%s\","
                        "\"cpuC\":%d,\"socC\":%d,\"socMax\":%d,\"socMaxId\":%d,\"socN\":%d,"
-                       "\"cpuMHz\":%ld,\"socSensors\":[",
-                       h.fw, model, serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz);
+                       "\"cpuMHz\":%ld,\"fanPct\":%d,\"socSensors\":[",
+                       h.fw, model, serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz,
+                       h.fanPct);
     for (int i = 0; json != NULL && i < h.socN; i++)
         json = text_append(json, &cap, &used, "%s{\"id\":%d,\"c\":%d}", i ? "," : "", h.socIds[i],
                            h.socVals[i]);
@@ -2221,6 +2240,108 @@ static void fan_command(int client, const char *temp_text)
     else
         reply(client, "ok fan duty=%u,%u,%u,%u,%u,%u", duty[0], duty[1], duty[2], duty[3], duty[4],
               duty[5]);
+}
+
+// Apply the manual threshold once (clamped). Returns the ioctl result, or -1 if
+// the device would not open.
+static int fan_set_threshold(int temp)
+{
+    if (temp < 30)
+        temp = 30;
+    if (temp > 90)
+        temp = 90;
+    const int fd = open(ICC_FAN_DEV, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    unsigned char data[10] = {0, 0, 0, 0, 0, (unsigned char)temp, 0, 0, 0, 0};
+    const int rc = ioctl(fd, ICC_FAN_SET_THRESHOLD, data);
+    close(fd);
+    return rc;
+}
+
+// The system reverts a manual threshold (on game launch, XMB transitions...), so
+// a one-shot `fan set` does not stick. `fan hold TEMP [SECS]` re-applies it every
+// SECS seconds in the background (idea from owendswang/ps5-fan-control, which runs
+// as a dedicated daemon; here it is one resident thread). `gen` is bumped to tell
+// the current holder to exit, so a restart never leaves two threads running.
+static struct
+{
+    volatile int gen;
+    volatile int running;
+    int temp;
+    int interval;
+} g_fan_hold;
+
+static void *fan_hold_thread(void *arg)
+{
+    const int my_gen = (int)(intptr_t)arg;
+    while (g_fan_hold.gen == my_gen)
+    {
+        fan_set_threshold(g_fan_hold.temp);
+        for (int i = 0; i < g_fan_hold.interval && g_fan_hold.gen == my_gen; i++)
+            sleep(1);
+    }
+    return NULL;
+}
+
+static void fan_hold_command(int client, const char *temp_text, const char *secs_text)
+{
+    if (temp_text == NULL)
+    {
+        if (g_fan_hold.running)
+            reply(client, "ok fan hold on temp=%dC interval=%ds", g_fan_hold.temp,
+                  g_fan_hold.interval);
+        else
+            reply(client, "ok fan hold off");
+        return;
+    }
+    if (strcmp(temp_text, "off") == 0 || strcmp(temp_text, "stop") == 0)
+    {
+        if (!g_fan_hold.running)
+            reply(client, "ok fan hold already off");
+        else
+        {
+            g_fan_hold.running = 0;
+            g_fan_hold.gen++; // the holder thread sees the change and exits within 1 s
+            reply(client, "ok fan hold off (threshold left at %dC)", g_fan_hold.temp);
+        }
+        return;
+    }
+    ensure_elevated();
+    int temp = atoi(temp_text);
+    if (temp < 30)
+        temp = 30;
+    if (temp > 90)
+        temp = 90;
+    int interval = secs_text != NULL ? atoi(secs_text) : 7;
+    if (interval < 1)
+        interval = 1;
+    if (interval > 3600)
+        interval = 3600;
+    if (g_fan_hold.running)
+    {
+        g_fan_hold.temp = temp; // the running holder re-reads these each cycle
+        g_fan_hold.interval = interval;
+        reply(client, "ok fan hold updated temp=%dC interval=%ds", temp, interval);
+        return;
+    }
+    if (fan_set_threshold(temp) != 0)
+    {
+        reply(client, "err fan hold: %s", strerror(errno));
+        return;
+    }
+    g_fan_hold.temp = temp;
+    g_fan_hold.interval = interval;
+    const int my_gen = ++g_fan_hold.gen;
+    pthread_t th;
+    if (pthread_create(&th, NULL, fan_hold_thread, (void *)(intptr_t)my_gen) != 0)
+    {
+        reply(client, "err fan hold: cannot start thread");
+        return;
+    }
+    pthread_detach(th);
+    g_fan_hold.running = 1;
+    reply(client, "ok fan hold temp=%dC interval=%ds", temp, interval);
 }
 
 // Beeper: the sceKernelIccSetBuzzer* calls are not stubs in this SDK, so resolve
@@ -3214,10 +3335,17 @@ static int handle_command(int client, char *line, const char *body, size_t body_
         const char *const sub = strtok(NULL, " \t");
         if (sub != NULL && strcmp(sub, "set") == 0)
             fan_command(client, strtok(NULL, " \t"));
+        else if (sub != NULL && strcmp(sub, "hold") == 0)
+        {
+            const char *const temp = strtok(NULL, " \t");
+            fan_hold_command(client, temp, temp != NULL ? strtok(NULL, " \t") : NULL);
+        }
         else if (sub == NULL)
             fan_command(client, NULL);
         else
-            reply(client, "err usage: fan  (read duty) | fan set TEMP (30..90)");
+            reply(client,
+                  "err usage: fan (read duty) | fan set TEMP (30..90) | "
+                  "fan hold TEMP [SECS] | fan hold off");
         return 0;
     }
     if (strcmp(command, "beeper") == 0)

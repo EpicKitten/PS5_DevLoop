@@ -113,10 +113,11 @@ disable that first.
 | `rest` / `reboot` / `power-off` | rest mode, reboot, or power off |
 | `uninstall TITLE_ID` | uninstall a title |
 | `notify TYPE MESSAGE` | an on-screen message: `toast` (banner) or `flyout` (card) |
-| `hwinfo` | model, serial, CPU temp, all 64 SoC sensors (incl. the hottest), CPU clock |
+| `hwinfo` | model, serial, CPU temp, all 64 SoC sensors (incl. the hottest), CPU clock, fan speed % |
 | `df` | free space per mounted volume |
 | `led BWA` / `off` / `auto` / `breathe B W A [MS]` / `chase [MS]` | the console indicator LED (static, off, system-controlled, or an animated effect), via `/dev/icc_indicator` |
 | `fan [TEMP]` | read the fan duty, or set the manual threshold (30..90 °C), via `/dev/icc_fan` |
+| `fan hold TEMP [SECS]` / `off` | re-apply the threshold every `SECS` s (default 7) in a background thread — a one-shot `fan set` is reverted by the system, so hold keeps it pinned (idea from [owendswang/ps5-fan-control](https://github.com/owendswang/ps5-fan-control)) |
 | `beeper [PATTERN]` / `mute 0\|1` / `vol 0..2` | beep the console, or set its mute / volume (`sceKernelIccSetBuzzer*`) |
 | `kill PID` | end a process (not just a registered app) |
 | `peek PID ADDR LEN` / `poke PID ADDR HEX` | read / write a process's memory (writes are read back and verified) |
@@ -192,7 +193,9 @@ http://<console>:9112/api/run?c=CMD  # run any command, get its reply
 
 The top of the page is the live hardware view: the model, the CPU temperature
 and **every SoC sensor** (gauges, a grid of all readings, and a rolling chart of
-the CPU and the hottest SoC sensor), and the CPU clock.
+the CPU and **all 64 SoC sensors**), the CPU clock, and a **fan-speed gauge and
+rolling chart** (from `sceKernelGetCurrentFanDuty`, not the manual-duty ioctl,
+which reads 0 in auto mode).
 
 Below it is a control panel that drives **every function the payload has**
 — the virtual pad (open/close and each DualSense button), frame and screenshot
