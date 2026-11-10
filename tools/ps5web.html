@@ -180,6 +180,11 @@
     </div>
     <pre id="out">Ready. Commands run on the console through GET /api/run.</pre>
     <div id="shot"></div>
+    <div class="row" style="margin-top:12px">
+      <input id="raw" placeholder="any command, e.g. pad tap 4000 120">
+      <button class="go" onclick="runIf('raw', c => c)">Run</button>
+    </div>
+    <div class="hint" style="margin-bottom:0">Runs verbatim through /api/run. Every command in AGENTS.md works here.</div>
   </div>
 
   <div class="panel">
@@ -356,12 +361,7 @@
 
     <!-- raw + power -->
     <div class="pcard wide">
-      <h3>Raw command &amp; power</h3>
-      <div class="row">
-        <input id="raw" placeholder="any command, e.g. pad tap 4000 120">
-        <button class="go" onclick="runIf('raw', c => c)">Run</button>
-      </div>
-      <div class="hint">Runs verbatim through /api/run. Every command in AGENTS.md works here.</div>
+      <h3>Power</h3>
       <div class="row">
         <button class="danger" onclick="runIf(null, () => 'power rest', 'Put the console into rest mode?')">power rest</button>
         <button class="danger" onclick="runIf(null, () => 'power reboot', 'Reboot the console?')">power reboot</button>
