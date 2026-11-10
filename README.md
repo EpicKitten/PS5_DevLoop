@@ -87,6 +87,42 @@ tools. The pad can launch anything from the home screen without them.
 `tools/ps5loop.py --help` lists the rest; `payload/main.c` documents the wire
 protocol (one text command per connection, port 9112).
 
+## Controlling the console
+
+Beyond input and sight, the payload drives the console through its own services,
+run with the payload's credentials. Paths are the console's real paths; a shell
+that rewrites absolute paths (Git Bash on Windows) mangles them, so quote or
+disable that first.
+
+| Command | What it does |
+| --- | --- |
+| `ps` | list every process, with the app id and title id of the apps |
+| `ls PATH` | list a console directory |
+| `get REMOTE [LOCAL]` | download a console file (default `downloads/<name>`) |
+| `put LOCAL REMOTE` | upload a local file to the console |
+| `rm PATH` / `mv SRC DST` | delete, move or rename a console file |
+| `open-url URL` | open a URL in the console's web browser |
+| `launch TITLE_ID` | launch a registered title |
+| `close-app [APP_ID]` | close a running app (id from `ps`, else the foreground one) |
+| `rest` / `reboot` / `power-off` | rest mode, reboot, or power off |
+| `uninstall TITLE_ID` | uninstall a title |
+
+Verified on firmware 12.20: `ps`, `ls`/`get`/`put`/`rm`/`mv` (a round trip is
+byte-for-byte), `open-url`, and `close-app`. Notes and limits:
+
+- **`launch`** uses `sceSystemServiceLaunchApp`, which takes titles registered in
+  the shell's app database. Homebrew launched by a loader or a launcher (the
+  `FAKE*` titles under `/data/homebrew`) are not registered and answer
+  `0x80940005`; a real installed title (a `PPSA*` id) launches.
+- **`rest` / `reboot` / `power-off` / `uninstall` are not reversible from here.**
+  They are implemented but were not triggered in testing (`off`/`reboot` end the
+  payload; `uninstall` removes a title). Power replies before it acts, since the
+  request may end the process first.
+- **Install a package** and **wake from standby** are not here yet: install needs
+  the app installer's full register-and-poll flow and a `.pkg` to build against;
+  wake is a host-side Remote Play packet that needs the console's pairing
+  credentials.
+
 ## How it works
 
 - **Input** is the system's virtual pad device (`scePadVirtualDevice*`, what

@@ -28,6 +28,17 @@ Commands:
   kernel-log [MS] [FILE] dump the console's kernel log: bring-up, for reading the
                         device and controller lines a new firmware prints
   doctor                check the host, payload, loader and capture tools
+  ps                    list the console's processes (with title ids)
+  ls PATH               list a console directory
+  get REMOTE [LOCAL]    download a console file (default: downloads/<name>)
+  put LOCAL REMOTE      upload a local file to the console
+  rm PATH               delete a console file
+  mv SRC DST            move or rename a console file
+  open-url URL          open a URL in the console's web browser
+  launch TITLE_ID       launch an installed title
+  close-app [APP_ID]    close a running app (app id from ps; else the big app)
+  rest / reboot / power-off   put the console in rest mode, reboot, or power off
+  uninstall TITLE_ID    uninstall a title (registered titles; irreversible)
 
 The console's address comes from PS5_HOST in the environment, then from .env in
 this project (.env.example). It is never printed.
@@ -278,6 +289,46 @@ def doctor():
     return 0 if ok else 1
 
 
+def fetch_text(line):
+    """Run a command whose answer is a text file (ps, ls) and print it."""
+    answer, data = command(line, timeout=60, payload=True)
+    if not answer.startswith("ok file"):
+        return say(answer)
+    sys.stdout.write(data.decode("utf-8", "replace"))
+    return 0
+
+
+def get_file(remote, local):
+    """Download a console file to a local path (default: downloads/<name>)."""
+    answer, data = command(f"get {remote}", timeout=300, payload=True)
+    if not answer.startswith("ok file"):
+        return say(answer)
+    out = Path(local) if local else ROOT / "downloads" / Path(remote).name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_bytes(data)
+    print(f"ok get {len(data)} bytes -> {out}")
+    return 0
+
+
+def put_file(local, remote):
+    """Upload a local file to a console path: one line, then the bytes."""
+    data = Path(local).read_bytes()
+    try:
+        connection = socket.create_connection((console_host(), PORT), timeout=10)
+    except OSError as error:
+        raise SystemExit(f"ps5loop: the payload did not answer ({error.strerror or error})") from None
+    with connection:
+        connection.settimeout(300)
+        connection.sendall(f"put {remote} {len(data)}\n".encode() + data)
+        answer = b""
+        while b"\n" not in answer:
+            chunk = connection.recv(65536)
+            if not chunk:
+                break
+            answer += chunk
+    return say(answer.partition(b"\n")[0].decode("utf-8", "replace"))
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -320,6 +371,26 @@ def main():
     commands.add_parser("delete-capture").add_argument("path",
                                                        help="a capture under /user/av_contents/")
     commands.add_parser("doctor")
+    commands.add_parser("ps")
+    commands.add_parser("ls").add_argument("path")
+    getting = commands.add_parser("get")
+    getting.add_argument("remote")
+    getting.add_argument("local", nargs="?")
+    putting = commands.add_parser("put")
+    putting.add_argument("local")
+    putting.add_argument("remote")
+    commands.add_parser("rm").add_argument("path")
+    moving = commands.add_parser("mv")
+    moving.add_argument("src")
+    moving.add_argument("dst")
+    commands.add_parser("open-url").add_argument("url")
+    commands.add_parser("launch").add_argument("title_id")
+    commands.add_parser("close-app").add_argument("app_id", nargs="?",
+                                                 help="an app id from ps; omitted, the running big app")
+    commands.add_parser("rest")
+    commands.add_parser("reboot")
+    commands.add_parser("power-off")
+    commands.add_parser("uninstall").add_argument("title_id")
     args = parser.parse_args()
 
     if args.command == "load":
@@ -351,6 +422,29 @@ def main():
         return say(command(f"delete-capture {args.path}")[0])
     if args.command == "doctor":
         return doctor()
+    if args.command == "ps":
+        return fetch_text("ps")
+    if args.command == "ls":
+        return fetch_text(f"ls {args.path}")
+    if args.command == "get":
+        return get_file(args.remote, args.local)
+    if args.command == "put":
+        return put_file(args.local, args.remote)
+    if args.command == "rm":
+        return say(command(f"rm {args.path}")[0])
+    if args.command == "mv":
+        return say(command(f"mv {args.src} {args.dst}")[0])
+    if args.command == "open-url":
+        return say(command(f"open-url {args.url}")[0])
+    if args.command == "launch":
+        return say(command(f"launch {args.title_id}")[0])
+    if args.command == "close-app":
+        return say(command(f"close-app {args.app_id}" if args.app_id else "close-app")[0])
+    if args.command in ("rest", "reboot", "power-off"):
+        what = {"rest": "rest", "reboot": "reboot", "power-off": "off"}[args.command]
+        return say(command(f"power {what}")[0])
+    if args.command == "uninstall":
+        return say(command(f"uninstall {args.title_id}")[0])
     if args.command == "press":
         return say(command(f"pad tap {mask(args.buttons):x} {args.ms}")[0])
     if args.command == "hold":

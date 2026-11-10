@@ -34,6 +34,16 @@
  *   frame REQUEST FOLDER [MS] ask a running title for its frame: create the
  *                             file REQUEST, which the title takes as "write a
  *                             picture into FOLDER", send the picture, delete it
+ *   ps                        list processes (pid, app id, title id, command)
+ *   ls PATH                   list a directory
+ *   get PATH                  send a file's bytes
+ *   put PATH SIZE             write the SIZE bytes that follow to a file
+ *   rm PATH / mv FROM TO      delete, move or rename a file
+ *   open-url URL              open a URL in the web browser
+ *   launch TITLE_ID           launch a registered title
+ *   close-app [APP_ID]        close a running app (default: the foreground one)
+ *   uninstall TITLE_ID        uninstall a title
+ *   power off|reboot|rest     power off, reboot, or enter rest mode
  *   quit                      remove the pad and leave the console
  *
  * The pad is the system's own virtual device (libScePad's
@@ -64,7 +74,13 @@
  * A title that can write its own frame is asked instead ("frame"): it is quicker
  * by an order of magnitude and leaves nothing behind, but shows only what the
  * title drew. The title's side is a file it looks for and removes
- * (AGENTS.md, "Giving a title grab").
+ * (AGENTS.md, "Giving a title a frame").
+ *
+ * Beyond input and sight, the payload also controls the console: list and send
+ * and receive files (ls/get/put/rm/mv), list processes (ps), launch and close
+ * titles (launch/close), open a URL, and power the console (rest/reboot/off).
+ * These use the console's own services, linked or dlopened, run with the
+ * payload's elevated credentials.
  */
 
 #include <arpa/inet.h>
@@ -84,7 +100,9 @@
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
+#include <sys/sysctl.h>
 #include <sys/types.h>
+#include <sys/user.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -948,8 +966,335 @@ static void take_shot(int client, int hold_ms)
           before[0].path[0] != '\0' ? before[0].path : "none");
 }
 
+/* ---- Controlling the console: files, processes, apps, power. ---------------
+ *
+ * These reach the console's own services, which the payload's credentials
+ * (elevate()) let it use. Paths are the console's real paths; a file op escapes
+ * the payload's sandbox for the length of the op so that system paths resolve
+ * (as the PS5 payload SDK's list_files sample does). */
+
+static void elevate(char *report, size_t size);
+
+// Raise this process to the console's credentials, discarding the report.
+static void ensure_elevated(void)
+{
+    char report[80] = {0};
+    elevate(report, sizeof(report));
+}
+
+// Run against the whole filesystem, not the payload's jail, for one operation.
+static intptr_t fs_escape(void)
+{
+    const pid_t pid = getpid();
+    const intptr_t saved = kernel_get_proc_rootdir(pid);
+    kernel_set_proc_rootdir(pid, kernel_get_root_vnode());
+    return saved;
+}
+
+static void fs_restore(intptr_t saved)
+{
+    kernel_set_proc_rootdir(getpid(), saved);
+}
+
+// Send a header line then size bytes of a buffer, so the client reads it as a
+// file: a text answer (ps, ls) or a whole file (get) travel the same way.
+static void send_bytes(int client, const char *what, const char *buffer, size_t size)
+{
+    reply(client, "ok file size=%zu mtime=0 path=%s", size, what);
+    for (size_t sent = 0; sent < size;)
+    {
+        const ssize_t step = send(client, buffer + sent, size - sent, 0);
+        if (step <= 0)
+            break;
+        sent += (size_t)step;
+    }
+}
+
+// Append printf output to a growing text buffer; returns the buffer (possibly
+// moved) or NULL if it could not grow.
+static char *text_append(char *text, size_t *cap, size_t *used, const char *format, ...)
+    __attribute__((format(printf, 4, 5)));
+static char *text_append(char *text, size_t *cap, size_t *used, const char *format, ...)
+{
+    if (text == NULL)
+        return NULL;
+    if (*cap - *used < 1280)
+    {
+        char *const bigger = realloc(text, *cap * 2);
+        if (bigger == NULL)
+        {
+            free(text);
+            return NULL;
+        }
+        text = bigger;
+        *cap *= 2;
+    }
+    va_list arguments;
+    va_start(arguments, format);
+    *used += (size_t)vsnprintf(text + *used, *cap - *used, format, arguments);
+    va_end(arguments);
+    return text;
+}
+
+// ps: every process, with the title id of the ones that are apps.
+typedef struct app_info
+{
+    uint32_t app_id;
+    uint64_t unknown1;
+    uint32_t app_type;
+    char title_id[10];
+    char unknown2[0x3c];
+} app_info_t;
+int sceKernelGetAppInfo(pid_t pid, app_info_t *info);
+
+static void list_processes(int client)
+{
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PROC, 0};
+    size_t len = 0;
+    if (sysctl(mib, 4, NULL, &len, NULL, 0) != 0)
+    {
+        reply(client, "err ps: %s", strerror(errno));
+        return;
+    }
+    char *const procs = malloc(len);
+    if (procs == NULL || sysctl(mib, 4, procs, &len, NULL, 0) != 0)
+    {
+        free(procs);
+        reply(client, "err ps: %s", strerror(errno));
+        return;
+    }
+    size_t cap = 1u << 16, used = 0;
+    char *text = malloc(cap);
+    text = text_append(text, &cap, &used, "%6s %6s %-10s %-12s %s\n", "PID", "PPID", "APPID",
+                       "TITLEID", "COMMAND");
+    for (char *ptr = procs; text != NULL && ptr + sizeof(struct kinfo_proc) <= procs + len;)
+    {
+        const struct kinfo_proc *const ki = (const struct kinfo_proc *)ptr;
+        if (ki->ki_structsize == 0)
+            break;
+        ptr += ki->ki_structsize;
+        app_info_t info;
+        if (sceKernelGetAppInfo(ki->ki_pid, &info) != 0)
+            memset(&info, 0, sizeof(info));
+        char app_id[12] = "-";
+        if (info.app_id != 0)
+            snprintf(app_id, sizeof(app_id), "0x%x", info.app_id);
+        text = text_append(text, &cap, &used, "%6u %6u %-10s %-12s %s\n", (unsigned)ki->ki_pid,
+                           (unsigned)ki->ki_ppid, app_id,
+                           info.title_id[0] != '\0' ? info.title_id : "-", ki->ki_comm);
+    }
+    free(procs);
+    if (text == NULL)
+        reply(client, "err ps: out of memory");
+    else
+        send_bytes(client, "ps", text, used);
+    free(text);
+}
+
+// ls: one line per entry, "<type> <size> <name>".
+static void list_dir(int client, const char *path)
+{
+    const intptr_t saved = fs_escape();
+    DIR *const dir = opendir(path);
+    if (dir == NULL)
+    {
+        const int err = errno;
+        fs_restore(saved);
+        reply(client, "err ls %s: %s", path, strerror(err));
+        return;
+    }
+    size_t cap = 1u << 16, used = 0;
+    char *text = malloc(cap);
+    struct dirent *entry;
+    while (text != NULL && (entry = readdir(dir)) != NULL)
+    {
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0)
+            continue;
+        char full[1100];
+        snprintf(full, sizeof(full), "%s/%s", path, entry->d_name);
+        struct stat st;
+        const char kind = stat(full, &st) == 0 ? (S_ISDIR(st.st_mode) ? 'd' : '-') : '?';
+        text = text_append(text, &cap, &used, "%c %12lld %s\n", kind,
+                           kind == '-' ? (long long)st.st_size : 0LL, entry->d_name);
+    }
+    closedir(dir);
+    fs_restore(saved);
+    if (text == NULL)
+        reply(client, "err ls: out of memory");
+    else
+        send_bytes(client, path, text, used);
+    free(text);
+}
+
+// get: send a file's bytes.
+static void get_file(int client, const char *path)
+{
+    const intptr_t saved = fs_escape();
+    const int file = open(path, O_RDONLY);
+    struct stat st;
+    if (file < 0 || fstat(file, &st) != 0)
+    {
+        const int err = errno;
+        if (file >= 0)
+            close(file);
+        fs_restore(saved);
+        reply(client, "err get %s: %s", path, strerror(err));
+        return;
+    }
+    reply(client, "ok file size=%lld mtime=%lld path=%s", (long long)st.st_size,
+          (long long)st.st_mtime, path);
+    char buffer[65536];
+    for (;;)
+    {
+        const ssize_t got = read(file, buffer, sizeof(buffer));
+        if (got <= 0)
+            break;
+        bool broken = false;
+        for (ssize_t sent = 0; sent < got;)
+        {
+            const ssize_t step = send(client, buffer + sent, (size_t)(got - sent), 0);
+            if (step <= 0)
+            {
+                broken = true;
+                break;
+            }
+            sent += step;
+        }
+        if (broken)
+            break;
+    }
+    close(file);
+    fs_restore(saved);
+}
+
+// put: write size bytes to path. `body` is whatever of them already arrived
+// with the command line; the rest is read from the connection.
+static void put_file(int client, const char *path, size_t size, const char *body, size_t body_len)
+{
+    const intptr_t saved = fs_escape();
+    const int file = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0666);
+    fs_restore(saved);
+    if (file < 0)
+    {
+        reply(client, "err put %s: %s", path, strerror(errno));
+        return;
+    }
+    size_t written = 0;
+    if (body_len > size)
+        body_len = size;
+    if (body_len > 0 && write(file, body, body_len) == (ssize_t)body_len)
+        written = body_len;
+    char buffer[65536];
+    while (written < size)
+    {
+        const size_t want = size - written < sizeof(buffer) ? size - written : sizeof(buffer);
+        const ssize_t got = recv(client, buffer, want, 0);
+        if (got <= 0 || write(file, buffer, (size_t)got) != got)
+            break;
+        written += (size_t)got;
+    }
+    close(file);
+    if (written == size)
+        reply(client, "ok put %zu bytes %s", written, path);
+    else
+        reply(client, "err put %s: wrote %zu of %zu bytes", path, written, size);
+}
+
+static void remove_path(int client, const char *path)
+{
+    const intptr_t saved = fs_escape();
+    const int result = unlink(path);
+    const int err = errno;
+    fs_restore(saved);
+    reply(client, result == 0 ? "ok rm %s" : "err rm %s: %s", path, strerror(err));
+}
+
+static void move_path(int client, const char *from, const char *to)
+{
+    const intptr_t saved = fs_escape();
+    const int result = rename(from, to);
+    const int err = errno;
+    fs_restore(saved);
+    if (result == 0)
+        reply(client, "ok mv %s %s", from, to);
+    else
+        reply(client, "err mv %s -> %s: %s", from, to, strerror(err));
+}
+
+// open-url: the console's web browser, as the SDK's browser sample launches it.
+int sceSystemServiceLaunchWebBrowser(const char *uri, void *param);
+
+static void open_url(int client, const char *url)
+{
+    ensure_elevated();
+    const int32_t result = sceSystemServiceLaunchWebBrowser(url, NULL);
+    reply(client, "%s open-url result=0x%08x %s", result == 0 ? "ok" : "err", (uint32_t)result, url);
+}
+
+// Apps: launch a title by id, close a running app by its app id (from ps).
+int sceSystemServiceLaunchApp(const char *title_id, const char *argv[], void *param);
+int sceLncUtilKillApp(uint32_t app_id);
+int sceSystemServiceGetAppIdOfRunningBigApp(void);
+
+static void launch_app(int client, const char *title_id)
+{
+    ensure_elevated();
+    const char *argv[] = {NULL};
+    const int32_t result = sceSystemServiceLaunchApp(title_id, argv, NULL);
+    if (result > 0)
+        reply(client, "ok launch %s appId=0x%x", title_id, (uint32_t)result);
+    else
+        reply(client, "err launch %s result=0x%08x", title_id, (uint32_t)result);
+}
+
+static void close_app(int client, const char *app_id_text)
+{
+    ensure_elevated();
+    const uint32_t app_id = app_id_text != NULL ? (uint32_t)strtoul(app_id_text, NULL, 0)
+                                                : (uint32_t)sceSystemServiceGetAppIdOfRunningBigApp();
+    if (app_id == 0)
+    {
+        reply(client, "err close-app: no app id (give one from ps, or no big app is running)");
+        return;
+    }
+    const int32_t result = sceLncUtilKillApp(app_id);
+    reply(client, "%s close-app appId=0x%x result=0x%08x", result == 0 ? "ok" : "err", app_id,
+          (uint32_t)result);
+}
+
+// Power: off and reboot do not return when they take; standby is "rest". The
+// reply goes out first, since the request may end the process before it would.
+int sceSystemServiceRequestPowerOff(void);
+int sceSystemServiceRequestReboot(void);
+int sceSystemStateMgrEnterStandby(void);
+
+static void power(int client, const char *what)
+{
+    ensure_elevated();
+    reply(client, "ok power %s requested", what);
+    if (strcmp(what, "off") == 0)
+        sceSystemServiceRequestPowerOff();
+    else if (strcmp(what, "reboot") == 0)
+        sceSystemServiceRequestReboot();
+    else
+        sceSystemStateMgrEnterStandby();
+}
+
+// uninstall: remove an installed title through the app installer service.
+int sceAppInstUtilInitialize(void);
+int sceAppInstUtilAppUnInstall(const char *title_id);
+
+static void uninstall_app(int client, const char *title_id)
+{
+    ensure_elevated();
+    sceAppInstUtilInitialize();
+    const int32_t result = sceAppInstUtilAppUnInstall(title_id);
+    reply(client, "%s uninstall %s result=0x%08x", result == 0 ? "ok" : "err", title_id,
+          (uint32_t)result);
+}
+
 // Answer one command. Returns 0 to keep serving, -1 to leave the console.
-static int handle_command(int client, char *line)
+static int handle_command(int client, char *line, const char *body, size_t body_len)
 {
     char report[PS5LOOP_LINE - 64] = {0};
     char *const command = strtok(line, " \t");
@@ -1065,6 +1410,100 @@ static int handle_command(int client, char *line)
             reply(client, "err usage: frame /REQUEST/FILE /PICTURE/FOLDER [MS]");
         else
             grab(client, request, folder, wait_ms > 0 && wait_ms <= 30000 ? wait_ms : 3000);
+        return 0;
+    }
+    if (strcmp(command, "ps") == 0)
+    {
+        list_processes(client);
+        return 0;
+    }
+    if (strcmp(command, "ls") == 0)
+    {
+        const char *const path = strtok(NULL, " \t");
+        if (path == NULL || path[0] != '/')
+            reply(client, "err usage: ls /PATH");
+        else
+            list_dir(client, path);
+        return 0;
+    }
+    if (strcmp(command, "get") == 0)
+    {
+        const char *const path = strtok(NULL, " \t");
+        if (path == NULL || path[0] != '/')
+            reply(client, "err usage: get /PATH");
+        else
+            get_file(client, path);
+        return 0;
+    }
+    if (strcmp(command, "put") == 0)
+    {
+        const char *const path = strtok(NULL, " \t");
+        const char *const size = strtok(NULL, " \t");
+        if (path == NULL || size == NULL || path[0] != '/')
+            reply(client, "err usage: put /PATH SIZE (then SIZE bytes)");
+        else
+            put_file(client, path, strtoull(size, NULL, 10), body, body_len);
+        return 0;
+    }
+    if (strcmp(command, "rm") == 0)
+    {
+        const char *const path = strtok(NULL, " \t");
+        if (path == NULL || path[0] != '/')
+            reply(client, "err usage: rm /PATH");
+        else
+            remove_path(client, path);
+        return 0;
+    }
+    if (strcmp(command, "mv") == 0)
+    {
+        const char *const from = strtok(NULL, " \t");
+        const char *const to = strtok(NULL, " \t");
+        if (from == NULL || to == NULL || from[0] != '/' || to[0] != '/')
+            reply(client, "err usage: mv /FROM /TO");
+        else
+            move_path(client, from, to);
+        return 0;
+    }
+    if (strcmp(command, "open-url") == 0)
+    {
+        const char *const url = strtok(NULL, " \t");
+        if (url == NULL)
+            reply(client, "err usage: open-url URL");
+        else
+            open_url(client, url);
+        return 0;
+    }
+    if (strcmp(command, "launch") == 0)
+    {
+        const char *const title_id = strtok(NULL, " \t");
+        if (title_id == NULL)
+            reply(client, "err usage: launch TITLE_ID");
+        else
+            launch_app(client, title_id);
+        return 0;
+    }
+    if (strcmp(command, "close-app") == 0)
+    {
+        close_app(client, strtok(NULL, " \t"));
+        return 0;
+    }
+    if (strcmp(command, "power") == 0)
+    {
+        const char *const what = strtok(NULL, " \t");
+        if (what == NULL ||
+            (strcmp(what, "off") != 0 && strcmp(what, "reboot") != 0 && strcmp(what, "rest") != 0))
+            reply(client, "err usage: power off|reboot|rest");
+        else
+            power(client, what);
+        return 0;
+    }
+    if (strcmp(command, "uninstall") == 0)
+    {
+        const char *const title_id = strtok(NULL, " \t");
+        if (title_id == NULL)
+            reply(client, "err usage: uninstall TITLE_ID");
+        else
+            uninstall_app(client, title_id);
         return 0;
     }
     if (strcmp(command, "pad") != 0)
@@ -1193,26 +1632,36 @@ static int handle_command(int client, char *line)
 }
 
 // Read one command line and answer it. Returns 0 to keep serving, -1 to leave.
+// Bytes after the line's newline (an upload body, for "put") are handed on.
 static int serve_client(int client)
 {
-    char line[256] = {0};
+    char buffer[1200] = {0};
     size_t used = 0;
-    while (used + 1 < sizeof(line))
+    char *newline = NULL;
+    while (used + 1 < sizeof(buffer))
     {
-        const ssize_t bytes = recv(client, line + used, sizeof(line) - 1 - used, 0);
+        const ssize_t bytes = recv(client, buffer + used, sizeof(buffer) - 1 - used, 0);
         if (bytes <= 0)
             break;
         used += (size_t)bytes;
-        line[used] = '\0';
-        if (strchr(line, '\n') != NULL)
+        newline = memchr(buffer, '\n', used);
+        if (newline != NULL)
             break;
     }
-    while (used > 0 && (line[used - 1] == '\n' || line[used - 1] == '\r'))
-        line[--used] = '\0';
-    if (used == 0)
+    char line[1024];
+    size_t line_len = newline != NULL ? (size_t)(newline - buffer) : used;
+    if (line_len >= sizeof(line))
+        line_len = sizeof(line) - 1;
+    memcpy(line, buffer, line_len);
+    line[line_len] = '\0';
+    while (line_len > 0 && (line[line_len - 1] == '\r'))
+        line[--line_len] = '\0';
+    const char *body = newline != NULL ? newline + 1 : buffer + used;
+    const size_t body_len = newline != NULL ? (size_t)(buffer + used - (newline + 1)) : 0;
+    if (line_len == 0 && body_len == 0)
         return 0;
     log_line("ps5loop: command %s", line);
-    return handle_command(client, line);
+    return handle_command(client, line, body, body_len);
 }
 
 int main(int argc, char *argv[])

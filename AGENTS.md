@@ -84,6 +84,16 @@ Then add the title to `titles.json`:
 and prove it: launch the title, `tools/ps5loop.py frame --title mytitle`, look at
 the picture, and check the folder is empty afterwards.
 
+## Controlling the console
+
+The payload also drives the console, not just the pad: `ps`, `ls`/`get`/`put`/`rm`/`mv`,
+`open-url`, `launch`/`close-app`, `uninstall`, and `rest`/`reboot`/`power-off`
+(README.md, "Controlling the console"). `close-app` with no id closes the
+foreground app, so name an id from `ps` unless you mean that one. `launch` takes
+a registered title id, not the `FAKE*` homebrew a loader runs. `rest`, `reboot`,
+`power-off` and `uninstall` do not undo and end your access or remove a title:
+run them only when asked, and say so.
+
 ## Rules
 
 - **One console job at a time**, and never over a title someone is playing: ask
