@@ -67,8 +67,17 @@ is the real use. Verify it against a running title with a known address.
   register-and-poll flow. *Deferred: needs a `.pkg` to build against.*
 - **Wake from standby** — a host-side Remote Play magic packet (libSceRemoteplay
   on the console side is only part of it). *Deferred: needs pairing credentials.*
-- **Pad LED / rumble** — `scePad` lightbar and rumble as a physical test signal.
-  Low value for the *virtual* pad (no lightbar), so parked. *Deferred: low value.*
+- **Controller output — lightbar colour, rumble, triggers** — `scePadSetLightBar`,
+  `scePadSetVibration`, `scePadSetTriggerEffect` all exist, but they need a
+  `scePad` handle to the *physical* DualSense, and a background payload cannot
+  get one: the system shell (SceShellUI) owns the controller exclusively, so
+  `scePadOpen` answers `0x809b0081` (already opened), `scePadGetHandle` returns
+  only this process's own (none) `0x80920008`, and `scePadOpenExt2` wants a
+  param struct that is not documented (`0x80920001` for a zeroed one). Measured
+  on 12.20 with a real controller connected. The virtual pad has no LEDs, so it
+  is not a target either. The working path (as in PS5 Suite) is to bridge into
+  SceShellUI, which owns the pad session — a separate, larger effort.
+  *Deferred: needs a SceShellUI bridge or the ScePadOpenExt2 param layout.*
 
 ## Notes
 
