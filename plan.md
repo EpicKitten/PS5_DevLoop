@@ -59,9 +59,20 @@ needs no `scePad` handle). The SDK already provides `kernel_proc_copyin/copyout`
 (the syscall-573-style cross-process primitive) should `peek`/`poke` ever want
 it instead of `mdbg`.
 
+### Implemented but not yet hardware-verified
+
+- **`call PID FUNC [ARGS]`** — invoke a function in a process by a ptrace
+  thread-hijack: attach, save the registers, point RIP at FUNC with up to six
+  integer args in the SysV registers and a faulting return address, continue,
+  read RAX when it traps back, then restore and detach. It builds clean and the
+  `dlsym` → `call` path is sound, but it has **not** been run against a live
+  process: ptrace can be restricted on PS5 (attach fails cleanly if so), a
+  process cannot ptrace itself, and a running title must not be risked, so a
+  positive run needs a dedicated throwaway target. Treat it as experimental.
+
 ## Not possible from a background payload (architectural, not a choice)
 
-These four cannot be done from DevLoop's background payload in this environment —
+These three cannot be done from DevLoop's background payload in this environment —
 each needs a subsystem the payload fundamentally lacks, not just more code. They
 are the honest edge of what this design reaches.
 
@@ -72,12 +83,6 @@ are the honest edge of what this design reaches.
   bridge into SceShellUI's pad session (as PS5-Suite does) — a project in itself.
   *The console's own body LED is controllable via `/dev/icc_indicator` (`led`);
   this item is only the pad's own LEDs/haptics.*
-- **Call a function in a running process** — the *resolve* half is done
-  (`dlsym`); actually invoking a function with arguments requires writing a stub
-  into the target and hijacking one of its threads (register save, redirect,
-  catch the return, restore). That is a debugger subsystem with real crash risk
-  on a live title, so it is left to a dedicated effort rather than attempted
-  unprompted on the console.
 - **Modal dialogs** — `sceMsgDialog` / `sceErrorDialog` / `sceImeDialog` are
   CommonDialog dialogs that draw into the *calling* process's framebuffer and
   must be pumped from its render loop; a background payload has no video context,
@@ -100,8 +105,8 @@ exists, which it now is).
   not a quick win here.
 - Memory, kernel, process and settings commands run with the payload's elevated
   credentials. `kill`, `poke`, `kern-write`, `setting-set`, `fan`, `install`,
-  `uninstall` and `exec` can break a running title or change console state; use
-  them deliberately. `install`/`exec` are wired and fail gracefully, but a
+  `uninstall`, `exec` and `call` (ptrace attach) can break a running title or
+  change console state; use them deliberately. `install`/`exec` are wired and fail gracefully, but a
   positive run needs a real `.pkg` / binary on the console to confirm.
 - Writes are read back and verified where it is cheap (`poke`, `kern-write`,
   `setting-set`), so a silent failure is reported as `verify=mismatch`.
