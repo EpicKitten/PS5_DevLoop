@@ -42,16 +42,35 @@
  *   open-url URL              open a URL in the web browser
  *   launch TITLE_ID           launch a registered title
  *   close-app [APP_ID]        close a running app (default: the foreground one)
+ *   install /PATH.pkg         install a .pkg already on the console
+ *   exec /PATH [ARGS]         run a console binary, send back its output
+ *   locate-title              the foreground app's ids (app id, pid, title id)
+ *   module PID BASENAME       where a module is mapped in a process
+ *   modules PID               every loaded module in a process (handle/base/entry)
+ *   dlsym PID BASENAME SYM    resolve a symbol's address in a process
+ *   call PID FUNC [ARGS]      call a function in a process (<=6 int args) -> RAX
  *   uninstall TITLE_ID        uninstall a title
  *   power off|reboot|rest     power off, reboot, or enter rest mode
  *   notify TYPE MESSAGE       show a message: TYPE is toast or flyout
- *   hwinfo                    model, serial, temperatures, cpu clock
+ *   hwinfo                    model, serial, cpu + all SoC temperatures, cpu clock
  *   df                        free space per mounted volume
+ *   led BWA|off|auto|breathe B W A [MS]|chase [MS]   the console indicator LED
+ *   lightbar R G B            attempt the physical pad lightbar (shell owns it)
+ *   fan [set TEMP]            read the fan duty, or set the threshold (30..90 C)
+ *   beeper [PATTERN]|mute 0|1|vol 0..2   beep, mute, or set the beeper volume
+ *   GET / , GET /api/hwinfo   a browser gets the live dashboard, hosted here
  *   kill PID                  end a process
  *   peek PID ADDR LEN         read a process's memory
- *   poke PID ADDR HEX         write a process's memory
+ *   poke PID ADDR HEX         write a process's memory (read back and verified)
+ *   scan PID ADDR LEN W VALUE find a W-byte integer in a span (W is 1|2|4|8)
+ *   scan-aob PID ADDR LEN PAT find a byte pattern in a span (?? = wildcard)
+ *   kern-read ADDR LEN        read kernel memory (absolute address)
+ *   kern-write ADDR HEX       write kernel memory (read back and verified)
+ *   klog-stream [MS]          stream the kernel log until you disconnect
  *   http http://URL           fetch a URL and send the response
+ *   (a UDP probe to the command port is answered with an identifier: discovery)
  *   settings                  read the system registry as JSON
+ *   setting-set REGID VALUE   write one integer setting (read back and verified)
  *   quit                      remove the pad and leave the console
  *
  * The pad is the system's own virtual device (libScePad's
@@ -101,24 +120,32 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/param.h>
+#include <sys/ptrace.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <sys/types.h>
 #include <sys/user.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
+#include <machine/reg.h>
+
 #include <ps5/kernel.h>
 #include <ps5/mdbg.h>
+
+#include "dashboard_html.h" // the live dashboard, embedded so the console hosts it
 
 #define PS5LOOP_PORT 9112
 #define PS5LOOP_LINE 1024
@@ -191,6 +218,13 @@ extern int32_t scePadVirtualDeviceInsertData(int32_t handle, const void *data);
 extern int32_t scePadVirtualDeviceDeleteDevice(int32_t handle);
 extern int sceUserServiceInitialize(void *param);
 extern int sceUserServiceGetForegroundUser(int *user_id);
+
+/* The physical DualSense, to attempt lightbar control (SceShellUI owns it). */
+typedef struct pad_lightbar { uint8_t r, g, b, reserve; } pad_lightbar_t;
+extern int scePadInit(void);
+extern int scePadOpen(int user_id, int type, int index, void *param);
+extern int scePadClose(int handle);
+extern int scePadSetLightBar(int handle, pad_lightbar_t *param);
 
 /* libSceMbus, resolved at run time. */
 static int32_t (*mbus_bind)(uint64_t device_id, int32_t user_id);
@@ -329,6 +363,44 @@ static void *insert_thread(void *argument)
         }
         pthread_mutex_unlock(&g_pad.lock);
         usleep(PS5LOOP_INSERT_INTERVAL_US);
+    }
+    return NULL;
+}
+
+// Discovery beacon: answer a UDP probe on the command port so a client can find
+// the console on the LAN without its address hardcoded. It replies with an
+// identifier, never anything that needs the sender to be trusted.
+static void *discover_thread(void *argument)
+{
+    (void)argument;
+    const int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0)
+        return NULL;
+    int reuse = 1;
+    (void)setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_ANY);
+    address.sin_port = htons(PS5LOOP_PORT);
+    if (bind(sock, (struct sockaddr *)&address, sizeof(address)) != 0)
+    {
+        close(sock);
+        return NULL;
+    }
+    for (;;)
+    {
+        char probe[64];
+        struct sockaddr_in from;
+        socklen_t fromlen = sizeof(from);
+        const ssize_t n = recvfrom(sock, probe, sizeof(probe), 0, (struct sockaddr *)&from, &fromlen);
+        if (n < 0)
+            continue;
+        char answer[96];
+        const int len = snprintf(answer, sizeof(answer), "ps5loop fw=0x%08x port=%d pid=%d",
+                                 kernel_get_fw_version(), PS5LOOP_PORT, (int)getpid());
+        if (len > 0)
+            (void)sendto(sock, answer, (size_t)len, 0, (struct sockaddr *)&from, fromlen);
     }
     return NULL;
 }
@@ -1138,6 +1210,125 @@ static void list_dir(int client, const char *path)
     free(text);
 }
 
+// SHA-256 (FIPS 180-4), self-contained so the payload needs no crypto stub.
+typedef struct { uint32_t state[8]; uint64_t bitlen; uint8_t buf[64]; size_t len; } sha256_ctx;
+
+static uint32_t sha256_ror(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+
+static void sha256_block(sha256_ctx *c, const uint8_t *p)
+{
+    static const uint32_t k[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2 };
+    uint32_t w[64];
+    for (int i = 0; i < 16; i++)
+        w[i] = (uint32_t)p[i * 4] << 24 | (uint32_t)p[i * 4 + 1] << 16 |
+               (uint32_t)p[i * 4 + 2] << 8 | (uint32_t)p[i * 4 + 3];
+    for (int i = 16; i < 64; i++)
+    {
+        const uint32_t s0 = sha256_ror(w[i - 15], 7) ^ sha256_ror(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        const uint32_t s1 = sha256_ror(w[i - 2], 17) ^ sha256_ror(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint32_t a = c->state[0], b = c->state[1], cc = c->state[2], d = c->state[3];
+    uint32_t e = c->state[4], f = c->state[5], g = c->state[6], h = c->state[7];
+    for (int i = 0; i < 64; i++)
+    {
+        const uint32_t S1 = sha256_ror(e, 6) ^ sha256_ror(e, 11) ^ sha256_ror(e, 25);
+        const uint32_t ch = (e & f) ^ (~e & g);
+        const uint32_t t1 = h + S1 + ch + k[i] + w[i];
+        const uint32_t S0 = sha256_ror(a, 2) ^ sha256_ror(a, 13) ^ sha256_ror(a, 22);
+        const uint32_t maj = (a & b) ^ (a & cc) ^ (b & cc);
+        const uint32_t t2 = S0 + maj;
+        h = g; g = f; f = e; e = d + t1; d = cc; cc = b; b = a; a = t1 + t2;
+    }
+    c->state[0] += a; c->state[1] += b; c->state[2] += cc; c->state[3] += d;
+    c->state[4] += e; c->state[5] += f; c->state[6] += g; c->state[7] += h;
+}
+
+static void sha256_init(sha256_ctx *c)
+{
+    c->state[0] = 0x6a09e667; c->state[1] = 0xbb67ae85; c->state[2] = 0x3c6ef372; c->state[3] = 0xa54ff53a;
+    c->state[4] = 0x510e527f; c->state[5] = 0x9b05688c; c->state[6] = 0x1f83d9ab; c->state[7] = 0x5be0cd19;
+    c->bitlen = 0; c->len = 0;
+}
+
+static void sha256_update(sha256_ctx *c, const uint8_t *data, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+    {
+        c->buf[c->len++] = data[i];
+        if (c->len == 64) { sha256_block(c, c->buf); c->bitlen += 512; c->len = 0; }
+    }
+}
+
+static void sha256_final(sha256_ctx *c, uint8_t out[32])
+{
+    const uint64_t bits = c->bitlen + (uint64_t)c->len * 8;
+    size_t i = c->len;
+    c->buf[i++] = 0x80;
+    if (i > 56) { while (i < 64) c->buf[i++] = 0; sha256_block(c, c->buf); i = 0; }
+    while (i < 56) c->buf[i++] = 0;
+    for (int j = 7; j >= 0; j--) c->buf[i++] = (uint8_t)(bits >> (j * 8));
+    sha256_block(c, c->buf);
+    for (int j = 0; j < 8; j++)
+    {
+        out[j * 4] = (uint8_t)(c->state[j] >> 24);
+        out[j * 4 + 1] = (uint8_t)(c->state[j] >> 16);
+        out[j * 4 + 2] = (uint8_t)(c->state[j] >> 8);
+        out[j * 4 + 3] = (uint8_t)c->state[j];
+    }
+}
+
+// hash: SHA-256 of a file as hex. Reads through the sandbox escape like `get`,
+// so it can verify a transfer (compare with sha256sum on the host) without
+// pulling the whole file back.
+static void hash_file(int client, const char *path)
+{
+    const intptr_t saved = fs_escape();
+    const int file = open(path, O_RDONLY);
+    struct stat st;
+    if (file < 0 || fstat(file, &st) != 0)
+    {
+        const int err = errno;
+        if (file >= 0)
+            close(file);
+        fs_restore(saved);
+        reply(client, "err hash %s: %s", path, strerror(err));
+        return;
+    }
+    sha256_ctx ctx;
+    sha256_init(&ctx);
+    char buffer[65536];
+    ssize_t got;
+    long long total = 0;
+    while ((got = read(file, buffer, sizeof(buffer))) > 0)
+    {
+        sha256_update(&ctx, (const uint8_t *)buffer, (size_t)got);
+        total += got;
+    }
+    const int read_err = got < 0 ? errno : 0;
+    close(file);
+    fs_restore(saved);
+    if (read_err != 0)
+    {
+        reply(client, "err hash %s: %s", path, strerror(read_err));
+        return;
+    }
+    uint8_t digest[32];
+    sha256_final(&ctx, digest);
+    char hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(hex + i * 2, 3, "%02x", digest[i]);
+    reply(client, "ok hash sha256=%s size=%lld path=%s", hex, total, path);
+}
+
 // get: send a file's bytes.
 static void get_file(int client, const char *path)
 {
@@ -1251,7 +1442,25 @@ static void open_url(int client, const char *url)
 // quick; the keys are the regIds in hex.
 int sceRegMgrGetInt(uint32_t reg_id, int *value);
 int sceRegMgrGetStr(uint32_t reg_id, char *value, size_t size);
+int sceRegMgrSetInt(uint32_t reg_id, int value);
 static void json_escape(char *out, size_t size, const char *in);
+
+// setting-set: write one integer registry value by its regId and read it back.
+// The caller names the regId (as with poke, a wrong one can misconfigure the
+// console), so this is deliberately for a known key from a `settings` dump.
+static void setting_set(int client, uint32_t reg_id, int value)
+{
+    ensure_elevated();
+    const int rc = sceRegMgrSetInt(reg_id, value);
+    if (rc != 0)
+    {
+        reply(client, "err setting-set 0x%08x: result=0x%08x", reg_id, (uint32_t)rc);
+        return;
+    }
+    int check = 0;
+    const bool verified = sceRegMgrGetInt(reg_id, &check) == 0 && check == value;
+    reply(client, "ok setting-set 0x%08x=%d verify=%s", reg_id, value, verified ? "ok" : "mismatch");
+}
 
 static void settings_dump(int client)
 {
@@ -1329,6 +1538,247 @@ static void close_app(int client, const char *app_id_text)
           (uint32_t)result);
 }
 
+// locate-title: what is in the foreground right now. The running "big app" gives
+// the app id; the process list maps it to a pid, title id and command.
+static void locate_title(int client)
+{
+    ensure_elevated();
+    const int big = sceSystemServiceGetAppIdOfRunningBigApp();
+    if (big <= 0)
+    {
+        reply(client, "ok locate-title none (no foreground app)");
+        return;
+    }
+    const uint32_t app_id = (uint32_t)big;
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PROC, 0};
+    size_t len = 0;
+    char title[12] = "-", comm[32] = "-";
+    int found_pid = -1;
+    if (sysctl(mib, 4, NULL, &len, NULL, 0) == 0)
+    {
+        char *const procs = malloc(len);
+        if (procs != NULL && sysctl(mib, 4, procs, &len, NULL, 0) == 0)
+        {
+            for (char *ptr = procs; ptr + sizeof(struct kinfo_proc) <= procs + len;)
+            {
+                const struct kinfo_proc *const ki = (const struct kinfo_proc *)ptr;
+                if (ki->ki_structsize == 0)
+                    break;
+                ptr += ki->ki_structsize;
+                app_info_t info;
+                if (sceKernelGetAppInfo(ki->ki_pid, &info) == 0 && info.app_id == app_id)
+                {
+                    found_pid = ki->ki_pid;
+                    snprintf(title, sizeof(title), "%s", info.title_id[0] != '\0' ? info.title_id : "-");
+                    snprintf(comm, sizeof(comm), "%s", ki->ki_comm);
+                    break;
+                }
+            }
+        }
+        free(procs);
+    }
+    reply(client, "ok locate-title appId=0x%x pid=%d titleId=%s comm=%s", app_id, found_pid, title,
+          comm);
+}
+
+// module / dlsym: where a named shared object is mapped in a process, and the
+// address of a symbol in it. kernel_dynlib_* read another process's link map.
+static void module_info(int client, pid_t pid, const char *basename)
+{
+    uint32_t handle = 0;
+    if (kernel_dynlib_handle(pid, basename, &handle) != 0)
+    {
+        reply(client, "err module pid=%d %s: not found", (int)pid, basename);
+        return;
+    }
+    reply(client, "ok module pid=%d %s handle=0x%x base=0x%lx entry=0x%lx", (int)pid, basename,
+          handle, (long)kernel_dynlib_mapbase_addr(pid, handle),
+          (long)kernel_dynlib_entry_addr(pid, handle));
+}
+
+static void dlsym_lookup(int client, pid_t pid, const char *basename, const char *symbol)
+{
+    uint32_t handle = 0;
+    if (kernel_dynlib_handle(pid, basename, &handle) != 0)
+    {
+        reply(client, "err dlsym pid=%d %s: module not found", (int)pid, basename);
+        return;
+    }
+    const intptr_t addr = kernel_dynlib_dlsym(pid, handle, symbol);
+    if (addr == 0)
+        reply(client, "err dlsym pid=%d %s %s: not found", (int)pid, basename, symbol);
+    else
+        reply(client, "ok dlsym pid=%d %s %s=0x%lx", (int)pid, basename, symbol, (long)addr);
+}
+
+// call: run a function in a process with up to six integer args and return RAX.
+// ptrace thread-hijack: attach, save the registers, point RIP at the function
+// with args in the SysV registers and a return address that faults so the ret
+// traps back to us, continue, read RAX at the fault, restore, detach. ptrace is
+// often restricted on PS5, so attach may simply fail -- a clean error, no crash.
+static void call_in_process(int client, pid_t pid, intptr_t func, const uint64_t *args, int nargs)
+{
+    ensure_elevated();
+    if (ptrace(PT_ATTACH, pid, NULL, 0) != 0)
+    {
+        reply(client, "err call: attach pid=%d: %s (ptrace may be restricted here)", (int)pid,
+              strerror(errno));
+        return;
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    struct reg saved, regs;
+    if (ptrace(PT_GETREGS, pid, (caddr_t)&saved, 0) != 0)
+    {
+        const int err = errno;
+        ptrace(PT_DETACH, pid, NULL, 0);
+        reply(client, "err call: getregs pid=%d: %s", (int)pid, strerror(err));
+        return;
+    }
+    regs = saved;
+    regs.r_rdi = nargs > 0 ? (__int64_t)args[0] : 0;
+    regs.r_rsi = nargs > 1 ? (__int64_t)args[1] : 0;
+    regs.r_rdx = nargs > 2 ? (__int64_t)args[2] : 0;
+    regs.r_rcx = nargs > 3 ? (__int64_t)args[3] : 0;
+    regs.r_r8 = nargs > 4 ? (__int64_t)args[4] : 0;
+    regs.r_r9 = nargs > 5 ? (__int64_t)args[5] : 0;
+    // A return address that faults: when the function returns, RIP becomes this
+    // and the process stops with a signal we catch. Put it in scratch stack.
+    const uint64_t sentinel = 0x4141414141414141ull;
+    uint64_t sp = ((uint64_t)saved.r_rsp - 1024) & ~0xFull;
+    sp -= 8;
+    mdbg_copyin(pid, &sentinel, (intptr_t)sp, sizeof(sentinel));
+    regs.r_rsp = (__int64_t)sp;
+    regs.r_rip = (__int64_t)func;
+    if (ptrace(PT_SETREGS, pid, (caddr_t)&regs, 0) != 0)
+    {
+        const int err = errno;
+        ptrace(PT_SETREGS, pid, (caddr_t)&saved, 0);
+        ptrace(PT_DETACH, pid, NULL, 0);
+        reply(client, "err call: setregs pid=%d: %s", (int)pid, strerror(err));
+        return;
+    }
+    ptrace(PT_CONTINUE, pid, (caddr_t)1, 0);
+    waitpid(pid, &status, 0);
+    struct reg after;
+    uint64_t result = 0;
+    if (ptrace(PT_GETREGS, pid, (caddr_t)&after, 0) == 0)
+        result = (uint64_t)after.r_rax;
+    ptrace(PT_SETREGS, pid, (caddr_t)&saved, 0); // put the thread back
+    ptrace(PT_DETACH, pid, NULL, 0);
+    reply(client, "ok call pid=%d func=0x%lx rax=0x%llx", (int)pid, (long)func,
+          (unsigned long long)result);
+}
+
+// modules: every loaded module in a process. There is no enumeration call, so
+// walk the dynlib handle ids (they are small and sequential) and report the ones
+// with a mapping. Names need a kernel link-map walk, so this lists base/entry;
+// use `module PID NAME` for a named lookup.
+static void module_list(int client, pid_t pid)
+{
+    size_t cap = 1u << 13, used = 0;
+    char *text = malloc(cap);
+    text = text_append(text, &cap, &used, "%-8s %-18s %s\n", "HANDLE", "BASE", "ENTRY");
+    int found = 0;
+    for (uint32_t handle = 0; text != NULL && handle < 256; handle++)
+    {
+        const intptr_t base = kernel_dynlib_mapbase_addr(pid, handle);
+        if (base <= 0)
+            continue;
+        text = text_append(text, &cap, &used, "0x%-6x 0x%-16lx 0x%lx\n", handle, (long)base,
+                           (long)kernel_dynlib_entry_addr(pid, handle));
+        found++;
+    }
+    if (text == NULL)
+        reply(client, "err modules: out of memory");
+    else if (found == 0)
+        reply(client, "err modules pid=%d: none (bad pid?)", (int)pid);
+    else
+        send_bytes(client, "modules", text, used);
+    free(text);
+}
+
+// exec: run a binary and send back what it writes to stdout/stderr, then its
+// exit code. posix_spawn runs through the sandbox escape, so an absolute console
+// path resolves. A command DevLoop already has (ls, ps, ...) is usually better;
+// this is for running homebrew tools that live on the console.
+extern char **environ;
+
+static void exec_command(int client, char *argline)
+{
+    ensure_elevated();
+    char *argv[32];
+    int argc = 0;
+    for (char *tok = strtok(argline, " \t"); tok != NULL && argc < 31; tok = strtok(NULL, " \t"))
+        argv[argc++] = tok;
+    argv[argc] = NULL;
+    if (argc == 0)
+    {
+        reply(client, "err usage: exec /PATH [ARGS]");
+        return;
+    }
+    int pipefd[2];
+    if (pipe(pipefd) != 0)
+    {
+        reply(client, "err exec: pipe %s", strerror(errno));
+        return;
+    }
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, pipefd[1], 1);
+    posix_spawn_file_actions_adddup2(&fa, pipefd[1], 2);
+    posix_spawn_file_actions_addclose(&fa, pipefd[0]);
+    posix_spawn_file_actions_addclose(&fa, pipefd[1]);
+    pid_t child = 0;
+    const intptr_t saved = fs_escape();
+    const int rc = posix_spawn(&child, argv[0], &fa, NULL, argv, environ);
+    fs_restore(saved);
+    posix_spawn_file_actions_destroy(&fa);
+    close(pipefd[1]);
+    if (rc != 0)
+    {
+        close(pipefd[0]);
+        reply(client, "err exec %s: %s", argv[0], strerror(rc));
+        return;
+    }
+    size_t cap = 1u << 14, used = 0;
+    char *out = malloc(cap);
+    char buffer[4096];
+    ssize_t got;
+    while (out != NULL && (got = read(pipefd[0], buffer, sizeof(buffer))) > 0)
+    {
+        if (cap - used < (size_t)got + 1)
+        {
+            const size_t want = used + (size_t)got + 1;
+            size_t grow = cap * 2 > want ? cap * 2 : want;
+            char *const bigger = realloc(out, grow);
+            if (bigger == NULL)
+            {
+                free(out);
+                out = NULL;
+                break;
+            }
+            out = bigger;
+            cap = grow;
+        }
+        memcpy(out + used, buffer, (size_t)got);
+        used += (size_t)got;
+    }
+    close(pipefd[0]);
+    int status = 0;
+    waitpid(child, &status, 0);
+    if (out == NULL)
+        reply(client, "err exec: out of memory");
+    else
+    {
+        char header[64];
+        snprintf(header, sizeof(header), "exec pid=%d rc=%d", (int)child,
+                 WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+        send_bytes(client, header, out, used);
+    }
+    free(out);
+}
+
 // Power: off and reboot do not return when they take; standby is "rest". The
 // reply goes out first, since the request may end the process before it would.
 int sceSystemServiceRequestPowerOff(void);
@@ -1358,6 +1808,21 @@ static void uninstall_app(int client, const char *title_id)
     const int32_t result = sceAppInstUtilAppUnInstall(title_id);
     reply(client, "%s uninstall %s result=0x%08x", result == 0 ? "ok" : "err", title_id,
           (uint32_t)result);
+}
+
+// install: install a .pkg already on the console, through the app installer.
+// Verification is limited without a package to try; the call returns its result
+// and the installer's status word. The path is a console path (e.g. /data/x.pkg).
+int sceAppInstUtilAppInstallPkg(const char *path, int *status);
+
+static void install_pkg(int client, const char *path)
+{
+    ensure_elevated();
+    sceAppInstUtilInitialize();
+    int status = 0;
+    const int32_t result = sceAppInstUtilAppInstallPkg(path, &status);
+    reply(client, "%s install %s result=0x%08x status=0x%08x", result == 0 ? "ok" : "err", path,
+          (uint32_t)result, (uint32_t)status);
 }
 
 // A static buffer whose address ping reports, so peek/poke can be verified.
@@ -1444,17 +1909,316 @@ long sceKernelGetCpuFrequency(void);
 int sceKernelGetCpuTemperature(int *);
 int sceKernelGetSocSensorTemperature(int, int *);
 
+// The SoC exposes many thermal sensors, not one: sceKernelGetSocSensorTemperature
+// answers for ids 0..63 (probed on 13.60; a few succeed on 12.20). Scan them all
+// and keep the plausible readings, so hwinfo reports the whole thermal picture
+// and the hottest point, not just sensor 0.
+#define HWINFO_SOC_SENSORS 64
+
+typedef struct hwinfo
+{
+    uint32_t fw;
+    char model[256];
+    char serial[256];
+    long cpuMHz;
+    int cpuC;
+    int soc0;    // sensor 0, kept as the back-compatible socC
+    int socMax;  // the hottest valid sensor
+    int socMaxId;
+    int socN;    // how many sensors answered plausibly
+    int socIds[HWINFO_SOC_SENSORS];
+    int socVals[HWINFO_SOC_SENSORS];
+} hwinfo_t;
+
+static void hwinfo_read(hwinfo_t *h)
+{
+    memset(h, 0, sizeof(*h));
+    strcpy(h->model, "?");
+    strcpy(h->serial, "?");
+    h->fw = kernel_get_fw_version();
+    (void)sceKernelGetHwModelName(h->model);
+    (void)sceKernelGetHwSerialNumber(h->serial);
+    (void)sceKernelGetCpuTemperature(&h->cpuC);
+    h->cpuMHz = sceKernelGetCpuFrequency() / 1000000;
+    h->socMax = 0;
+    h->socMaxId = -1;
+    for (int id = 0; id < HWINFO_SOC_SENSORS; id++)
+    {
+        int value = 0;
+        if (sceKernelGetSocSensorTemperature(id, &value) != 0)
+            continue;
+        if (value < -40 || value > 150) // drop the known anomalous reading (id 64 ~ -49)
+            continue;
+        h->socIds[h->socN] = id;
+        h->socVals[h->socN] = value;
+        h->socN++;
+        if (id == 0)
+            h->soc0 = value;
+        if (h->socMaxId < 0 || value > h->socMax)
+        {
+            h->socMax = value;
+            h->socMaxId = id;
+        }
+    }
+}
+
 static void hwinfo(int client)
 {
-    char model[256] = "?", serial[256] = "?";
-    int cpu_temp = 0, soc_temp = 0;
-    (void)sceKernelGetHwModelName(model);
-    (void)sceKernelGetHwSerialNumber(serial);
-    (void)sceKernelGetCpuTemperature(&cpu_temp);
-    (void)sceKernelGetSocSensorTemperature(0, &soc_temp);
-    reply(client, "ok fw=0x%08x model=%s serial=%s cpuC=%d socC=%d cpuMHz=%ld",
-          kernel_get_fw_version(), model, serial, cpu_temp, soc_temp,
-          sceKernelGetCpuFrequency() / 1000000);
+    hwinfo_t h;
+    hwinfo_read(&h);
+    reply(client,
+          "ok fw=0x%08x model=%s serial=%s cpuC=%d socC=%d socMax=%d socMaxId=%d socN=%d cpuMHz=%ld",
+          h.fw, h.model, h.serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz);
+}
+
+// The same reading as a JSON object, for the dashboard the console hosts. The
+// caller frees the buffer; NULL on out of memory.
+static char *hwinfo_json(void)
+{
+    hwinfo_t h;
+    hwinfo_read(&h);
+    char model[520], serial[520];
+    json_escape(model, sizeof(model), h.model);
+    json_escape(serial, sizeof(serial), h.serial);
+    size_t cap = 1u << 12, used = 0;
+    char *json = malloc(cap);
+    json = text_append(json, &cap, &used,
+                       "{\"ok\":true,\"fw\":\"0x%08x\",\"model\":\"%s\",\"serial\":\"%s\","
+                       "\"cpuC\":%d,\"socC\":%d,\"socMax\":%d,\"socMaxId\":%d,\"socN\":%d,"
+                       "\"cpuMHz\":%ld,\"socSensors\":[",
+                       h.fw, model, serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz);
+    for (int i = 0; json != NULL && i < h.socN; i++)
+        json = text_append(json, &cap, &used, "%s{\"id\":%d,\"c\":%d}", i ? "," : "", h.socIds[i],
+                           h.socVals[i]);
+    return text_append(json, &cap, &used, "]}");
+}
+
+// ===== Console hardware: indicator LED, fan and beeper (ICC) =====
+// The indicator LED goes through /dev/icc_indicator's dynamic-LED ioctls -- a
+// direct device path, so it needs no scePad handle (which SceShellUI owns, the
+// blocker for lightbar output). State is a 130-byte blob: a 4-byte header
+// (count at [2..3]) then 42-byte per-channel blocks { id; step_count; steps }.
+// A held colour is one 5-byte step. Channels: 0x01 blue, 0x11 white, 0x21 amber.
+// Protocol from PS5-Suite / ps5-beeper-LED live-hardware research.
+#define ICC_INDICATOR_DEV "/dev/icc_indicator"
+#define ICC_LED_STATE_SIZE 130
+#define ICC_LED_GET 0x40829505ul
+#define ICC_LED_SET 0x80829504ul
+#define ICC_BLOCK_START 4
+#define ICC_BLOCK_SIZE 42
+
+static int icc_led_block(const uint8_t *st, uint8_t id)
+{
+    const int count = st[2] | (st[3] << 8);
+    for (int i = 0; i < count && ICC_BLOCK_START + (i + 1) * ICC_BLOCK_SIZE <= ICC_LED_STATE_SIZE; i++)
+    {
+        const int at = ICC_BLOCK_START + i * ICC_BLOCK_SIZE;
+        if (st[at] == id)
+            return at;
+    }
+    return -1;
+}
+
+// Hold the given levels (0-255) on the three channels; -1 leaves one unchanged.
+// Each touched channel is rewritten as one step, the encoding the ICC accepts.
+static int icc_led_set(int blue, int white, int amber)
+{
+    const int fd = open(ICC_INDICATOR_DEV, O_RDWR);
+    if (fd < 0)
+        return -errno;
+    uint8_t st[ICC_LED_STATE_SIZE];
+    if (ioctl(fd, ICC_LED_GET, st) != 0)
+    {
+        const int err = errno;
+        close(fd);
+        return -err;
+    }
+    const uint8_t ids[3] = {0x01, 0x11, 0x21};
+    const int lv[3] = {blue, white, amber};
+    int patched = 0;
+    for (int i = 0; i < 3; i++)
+    {
+        if (lv[i] < 0)
+            continue;
+        const int at = icc_led_block(st, ids[i]);
+        if (at < 0)
+            continue;
+        memset(st + at, 0, ICC_BLOCK_SIZE);
+        const uint8_t prog[7] = {ids[i], 1, 0x02, (uint8_t)lv[i], 0x05, 0x02, 0x00};
+        memcpy(st + at, prog, sizeof(prog));
+        patched = 1;
+    }
+    int rc = 0;
+    if (!patched)
+        rc = -ENODEV;
+    else if (ioctl(fd, ICC_LED_SET, st) != 0)
+        rc = -errno;
+    close(fd);
+    return rc;
+}
+
+// The dynamic-LED ioctl holds only static levels, so breathe and chase are
+// animated in software by a thread, which also re-asserts the colour because
+// the shell periodically reclaims the LED. mode 0 = auto (we stop touching it,
+// the system takes it back), 1 = static hold, 2 = breathe, 3 = chase.
+static pthread_mutex_t g_led_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct
+{
+    int mode, b, w, a, period_ms;
+} g_led = {0, 0, 0, 0, 4000};
+
+static void *led_fx_thread(void *argument)
+{
+    (void)argument;
+    for (;;)
+    {
+        pthread_mutex_lock(&g_led_lock);
+        const int mode = g_led.mode, b = g_led.b, w = g_led.w, a = g_led.a;
+        const int period = g_led.period_ms > 0 ? g_led.period_ms : 4000;
+        pthread_mutex_unlock(&g_led_lock);
+        if (mode == 0)
+        {
+            usleep(250000);
+            continue;
+        }
+        if (mode == 1)
+        {
+            (void)icc_led_set(b, w, a);
+            usleep(1000000); // a held colour, re-asserted each second
+        }
+        else if (mode == 2)
+        {
+            const double t = (double)(monotonic_us() / 1000u % (uint64_t)period);
+            const double half = period / 2.0;
+            const double frac = t < half ? t / half : (period - t) / half;
+            (void)icc_led_set((int)(b * frac), (int)(w * frac), (int)(a * frac));
+            usleep(40000);
+        }
+        else
+        {
+            const int step = period / 3 > 0 ? period / 3 : 1;
+            const uint64_t phase = (monotonic_us() / 1000u / (uint64_t)step) % 3;
+            (void)icc_led_set(phase == 0 ? 255 : 0, phase == 1 ? 255 : 0, phase == 2 ? 255 : 0);
+            usleep(40000);
+        }
+    }
+    return NULL;
+}
+
+static void led_set_effect(int client, int mode, int b, int w, int a, int period, const char *name)
+{
+    ensure_elevated();
+    if (mode != 0)
+    {
+        const int rc = icc_led_set(b, w, a); // probe the device and show a first frame
+        if (rc != 0)
+        {
+            reply(client, "err led: %s", strerror(-rc));
+            return;
+        }
+    }
+    pthread_mutex_lock(&g_led_lock);
+    g_led.mode = mode;
+    g_led.b = b;
+    g_led.w = w;
+    g_led.a = a;
+    if (period > 0)
+        g_led.period_ms = period;
+    pthread_mutex_unlock(&g_led_lock);
+    if (mode == 0)
+        reply(client, "ok led auto (the system controls the LED)");
+    else
+        reply(client, "ok led %s blue=%d white=%d amber=%d", name, b, w, a);
+}
+
+// Fan: /dev/icc_fan. One ioctl sets the manual temperature threshold (30-90 C,
+// the layout etaHEN uses: temp at byte 5); another reads the manual duty, which
+// reports fan speed rather than the threshold. Changing the threshold changes
+// cooling, so it is clamped and only set when asked.
+#define ICC_FAN_DEV "/dev/icc_fan"
+#define ICC_FAN_SET_THRESHOLD 0xC01C8F07ul
+#define ICC_FAN_GET_DUTY 0xC0068F06ul
+
+static void fan_command(int client, const char *temp_text)
+{
+    ensure_elevated();
+    const int fd = open(ICC_FAN_DEV, O_RDONLY);
+    if (fd < 0)
+    {
+        reply(client, "err fan: %s", strerror(errno));
+        return;
+    }
+    if (temp_text != NULL)
+    {
+        int temp = atoi(temp_text);
+        if (temp < 30)
+            temp = 30;
+        if (temp > 90)
+            temp = 90;
+        unsigned char data[10] = {0, 0, 0, 0, 0, (unsigned char)temp, 0, 0, 0, 0};
+        const int rc = ioctl(fd, ICC_FAN_SET_THRESHOLD, data);
+        const int err = errno;
+        close(fd);
+        if (rc == 0)
+            reply(client, "ok fan threshold=%dC", temp);
+        else
+            reply(client, "err fan set: %s", strerror(err));
+        return;
+    }
+    unsigned char duty[6] = {0};
+    const int rc = ioctl(fd, ICC_FAN_GET_DUTY, duty);
+    const int err = errno;
+    close(fd);
+    if (rc != 0)
+        reply(client, "err fan duty: %s", strerror(err));
+    else
+        reply(client, "ok fan duty=%u,%u,%u,%u,%u,%u", duty[0], duty[1], duty[2], duty[3], duty[4],
+              duty[5]);
+}
+
+// Beeper: the sceKernelIccSetBuzzer* calls are not stubs in this SDK, so resolve
+// them from a loaded libkernel at run time (PS5-Suite resolves them the same
+// way). `beep` sounds a pattern (once); `mute` and `vol` are persistent.
+static int (*icc_buzzer_fn(const char *symbol))(int)
+{
+    const char *const libs[] = {"libkernel_sys.sprx", "libkernel.sprx", "libkernel_web.sprx"};
+    for (size_t i = 0; i < sizeof(libs) / sizeof(libs[0]); i++)
+    {
+        void *const lib = dlopen(libs[i], RTLD_NOW | RTLD_GLOBAL);
+        if (lib != NULL)
+        {
+            int (*fn)(int) = (int (*)(int))dlsym(lib, symbol);
+            if (fn != NULL)
+                return fn;
+        }
+    }
+    return NULL;
+}
+
+static void beeper_command(int client, const char *action, int value)
+{
+    ensure_elevated();
+    const char *symbol = "sceKernelIccSetBuzzer"; // pattern 0..3, one shot
+    const char *what = "pattern";
+    if (action != NULL && strcmp(action, "mute") == 0)
+    {
+        symbol = "sceKernelIccSetBuzzerOffSetting"; // 1 = off (persistent)
+        what = "mute";
+    }
+    else if (action != NULL && strcmp(action, "vol") == 0)
+    {
+        symbol = "sceKernelIccSetBuzzerDimSetting"; // 0..2 volume (persistent)
+        what = "vol";
+    }
+    int (*fn)(int) = icc_buzzer_fn(symbol);
+    if (fn == NULL)
+    {
+        reply(client, "err beeper: %s unavailable", symbol);
+        return;
+    }
+    const int rc = fn(value);
+    reply(client, "%s beeper %s=%d result=0x%08x", rc == 0 ? "ok" : "err", what, value,
+          (uint32_t)rc);
 }
 
 // df: free space per mounted volume.
@@ -1532,12 +2296,220 @@ static void poke(int client, pid_t pid, intptr_t addr, const char *hex)
         const char byte[3] = {hex[i * 2], hex[i * 2 + 1], '\0'};
         buffer[i] = (char)strtoul(byte, NULL, 16);
     }
-    const int result = mdbg_copyin(pid, buffer, addr, len);
-    free(buffer);
-    if (result != 0)
+    if (mdbg_copyin(pid, buffer, addr, len) != 0)
+    {
+        free(buffer);
         reply(client, "err poke pid=%d addr=0x%lx: %s", (int)pid, (long)addr, strerror(errno));
+        return;
+    }
+    // truthful write: read it back and confirm the bytes took.
+    char *const check = malloc(len);
+    bool verified = false;
+    if (check != NULL && mdbg_copyout(pid, addr, check, len) == 0)
+        verified = memcmp(check, buffer, len) == 0;
+    free(check);
+    free(buffer);
+    reply(client, "ok poke %zu bytes pid=%d addr=0x%lx verify=%s", len, (int)pid, (long)addr,
+          verified ? "ok" : "mismatch");
+}
+
+// Read a span of a process's memory into a fresh buffer, in chunks the debugger
+// accepts. Returns NULL on allocation failure or an unreadable span.
+static char *mem_read_span(pid_t pid, intptr_t addr, size_t len)
+{
+    char *const buffer = malloc(len);
+    if (buffer == NULL)
+        return NULL;
+    for (size_t done = 0; done < len;)
+    {
+        const size_t step = len - done < 0x10000 ? len - done : 0x10000;
+        if (mdbg_copyout(pid, addr + (intptr_t)done, buffer + done, step) != 0)
+        {
+            free(buffer);
+            return NULL;
+        }
+        done += step;
+    }
+    return buffer;
+}
+
+#define SCAN_MAX_SPAN (16u << 20) // 16 MB per scan, to bound memory and time
+#define SCAN_MAX_HITS 4096        // report at most this many matches
+
+// scan: find a little-endian integer of WIDTH bytes equal to VALUE in a span of
+// a process's memory, stepping by WIDTH. Answers a text list of hex addresses.
+static void mem_scan(int client, pid_t pid, intptr_t addr, size_t len, int width, uint64_t value)
+{
+    if (width != 1 && width != 2 && width != 4 && width != 8)
+    {
+        reply(client, "err scan: width is 1, 2, 4 or 8");
+        return;
+    }
+    if (len == 0 || len > SCAN_MAX_SPAN)
+    {
+        reply(client, "err scan: length 1..%u", SCAN_MAX_SPAN);
+        return;
+    }
+    char *const buffer = mem_read_span(pid, addr, len);
+    if (buffer == NULL)
+    {
+        reply(client, "err scan pid=%d addr=0x%lx: %s", (int)pid, (long)addr, strerror(errno));
+        return;
+    }
+    const uint64_t mask = width == 8 ? ~0ull : ((1ull << (width * 8)) - 1);
+    size_t cap = 1u << 16, used = 0, hits = 0;
+    char *text = malloc(cap);
+    for (size_t off = 0; text != NULL && off + (size_t)width <= len; off += (size_t)width)
+    {
+        uint64_t here = 0;
+        memcpy(&here, buffer + off, (size_t)width);
+        if ((here & mask) != (value & mask))
+            continue;
+        if (hits < SCAN_MAX_HITS)
+            text = text_append(text, &cap, &used, "0x%lx\n", (long)(addr + (intptr_t)off));
+        hits++;
+    }
+    free(buffer);
+    if (text == NULL)
+        reply(client, "err scan: out of memory");
     else
-        reply(client, "ok poke %zu bytes pid=%d addr=0x%lx", len, (int)pid, (long)addr);
+    {
+        char header[96];
+        snprintf(header, sizeof(header), "scan hits=%zu shown=%zu", hits,
+                 hits < SCAN_MAX_HITS ? hits : (size_t)SCAN_MAX_HITS);
+        send_bytes(client, header, text, used);
+    }
+    free(text);
+}
+
+// scan-aob: find a byte pattern in a span. The pattern is hex byte pairs; "??"
+// is a wildcard. Answers a text list of hex addresses.
+static void mem_scan_aob(int client, pid_t pid, intptr_t addr, size_t len, const char *pattern)
+{
+    if (len == 0 || len > SCAN_MAX_SPAN)
+    {
+        reply(client, "err scan-aob: length 1..%u", SCAN_MAX_SPAN);
+        return;
+    }
+    const size_t plen = strlen(pattern) / 2;
+    if (plen == 0 || strlen(pattern) % 2 != 0 || plen > 256)
+    {
+        reply(client, "err scan-aob: pattern is 1..256 hex byte pairs (?? = wildcard)");
+        return;
+    }
+    unsigned char bytes[256];
+    unsigned char wild[256];
+    for (size_t i = 0; i < plen; i++)
+    {
+        const char hi = pattern[i * 2], lo = pattern[i * 2 + 1];
+        if (hi == '?' && lo == '?')
+        {
+            wild[i] = 1;
+            bytes[i] = 0;
+        }
+        else
+        {
+            const char pair[3] = {hi, lo, '\0'};
+            char *end = NULL;
+            bytes[i] = (unsigned char)strtoul(pair, &end, 16);
+            wild[i] = 0;
+            if (end != pair + 2)
+            {
+                reply(client, "err scan-aob: bad hex at byte %zu", i);
+                return;
+            }
+        }
+    }
+    char *const buffer = mem_read_span(pid, addr, len);
+    if (buffer == NULL)
+    {
+        reply(client, "err scan-aob pid=%d addr=0x%lx: %s", (int)pid, (long)addr, strerror(errno));
+        return;
+    }
+    size_t cap = 1u << 16, used = 0, hits = 0;
+    char *text = malloc(cap);
+    const unsigned char *const data = (const unsigned char *)buffer;
+    for (size_t off = 0; text != NULL && off + plen <= len; off++)
+    {
+        size_t i = 0;
+        for (; i < plen; i++)
+            if (!wild[i] && data[off + i] != bytes[i])
+                break;
+        if (i != plen)
+            continue;
+        if (hits < SCAN_MAX_HITS)
+            text = text_append(text, &cap, &used, "0x%lx\n", (long)(addr + (intptr_t)off));
+        hits++;
+    }
+    free(buffer);
+    if (text == NULL)
+        reply(client, "err scan-aob: out of memory");
+    else
+    {
+        char header[96];
+        snprintf(header, sizeof(header), "scan-aob hits=%zu shown=%zu", hits,
+                 hits < SCAN_MAX_HITS ? hits : (size_t)SCAN_MAX_HITS);
+        send_bytes(client, header, text, used);
+    }
+    free(text);
+}
+
+// kern-read / kern-write: raw kernel memory, by absolute kernel address. The
+// kernel R/W primitives come from the loader's exploit (ps5/kernel.h).
+static void kern_read(int client, intptr_t kaddr, size_t len)
+{
+    if (len == 0 || len > (1u << 20))
+    {
+        reply(client, "err kern-read: length 1..1048576");
+        return;
+    }
+    char *const buffer = malloc(len);
+    if (buffer == NULL)
+    {
+        reply(client, "err kern-read: out of memory");
+        return;
+    }
+    if (kernel_copyout(kaddr, buffer, len) != 0)
+        reply(client, "err kern-read addr=0x%lx: %s", (long)kaddr, strerror(errno));
+    else
+        send_bytes(client, "kern-read", buffer, len);
+    free(buffer);
+}
+
+static void kern_write(int client, intptr_t kaddr, const char *hex)
+{
+    const size_t hexlen = strlen(hex);
+    const size_t len = hexlen / 2;
+    if (len == 0 || hexlen % 2 != 0 || len > (1u << 20))
+    {
+        reply(client, "err kern-write: give an even-length hex string");
+        return;
+    }
+    char *const buffer = malloc(len);
+    if (buffer == NULL)
+    {
+        reply(client, "err kern-write: out of memory");
+        return;
+    }
+    for (size_t i = 0; i < len; i++)
+    {
+        const char byte[3] = {hex[i * 2], hex[i * 2 + 1], '\0'};
+        buffer[i] = (char)strtoul(byte, NULL, 16);
+    }
+    if (kernel_copyin(buffer, kaddr, len) != 0)
+    {
+        free(buffer);
+        reply(client, "err kern-write addr=0x%lx: %s", (long)kaddr, strerror(errno));
+        return;
+    }
+    char *const check = malloc(len);
+    bool verified = false;
+    if (check != NULL && kernel_copyout(kaddr, check, len) == 0)
+        verified = memcmp(check, buffer, len) == 0;
+    free(check);
+    free(buffer);
+    reply(client, "ok kern-write %zu bytes addr=0x%lx verify=%s", len, (long)kaddr,
+          verified ? "ok" : "mismatch");
 }
 
 // http: a plain HTTP/1.1 GET over a raw socket, for http:// URLs.
@@ -1624,6 +2596,79 @@ static void http_get(int client, const char *url)
 }
 
 // Answer one command. Returns 0 to keep serving, -1 to leave the console.
+// A minimal HTTP/1.1 response on the same port the text protocol uses: the
+// first word of a browser's request is GET (or HEAD), which the dispatcher
+// routes here. One request per connection; the server closes it after.
+static void http_send(int client, const char *status, const char *ctype, const void *body,
+                      size_t len, bool head_only)
+{
+    char header[256];
+    const int n = snprintf(header, sizeof(header),
+                           "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
+                           "Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+                           status, ctype, len);
+    if (n > 0 && send(client, header, (size_t)n, 0) < 0)
+        return;
+    if (head_only || len == 0)
+        return;
+    for (size_t sent = 0; sent < len;)
+    {
+        const ssize_t step = send(client, (const char *)body + sent, len - sent, 0);
+        if (step <= 0)
+            break;
+        sent += (size_t)step;
+    }
+}
+
+static void http_serve_page(int client, const char *verb, const char *url)
+{
+    const bool head_only = strcmp(verb, "HEAD") == 0;
+    if (url == NULL)
+        url = "/";
+    if (strcmp(url, "/") == 0 || strcmp(url, "/index.html") == 0)
+    {
+        http_send(client, "200 OK", "text/html; charset=utf-8", DASHBOARD_HTML, DASHBOARD_HTML_LEN,
+                  head_only);
+        return;
+    }
+    if (strcmp(url, "/api/hwinfo") == 0)
+    {
+        char *const json = hwinfo_json();
+        if (json == NULL)
+            http_send(client, "500 Internal Server Error", "text/plain", "oom", 3, head_only);
+        else
+            http_send(client, "200 OK", "application/json", json, strlen(json), head_only);
+        free(json);
+        return;
+    }
+    http_send(client, "404 Not Found", "text/plain; charset=utf-8", "not found", 9, head_only);
+}
+
+// lightbar: attempt the *physical* DualSense lightbar. SceShellUI owns the pad
+// session, so scePadOpen is expected to answer 0x809b0081 (already open) and
+// there is no handle to set a colour on. This command exists to demonstrate that
+// directly rather than only asserting it; if a firmware ever frees the pad, it
+// also becomes a real control.
+static void lightbar_try(int client, int r, int g, int b)
+{
+    const int init = scePadInit();
+    int user = -1;
+    (void)sceUserServiceGetForegroundUser(&user);
+    const int handle = scePadOpen(user, 0 /* SCE_PAD_PORT_TYPE_STANDARD */, 0, NULL);
+    if (handle < 0)
+    {
+        reply(client,
+              "err lightbar: init=0x%08x scePadOpen user=0x%08x result=0x%08x — SceShellUI owns the pad",
+              (uint32_t)init, (uint32_t)user, (uint32_t)handle);
+        return;
+    }
+    pad_lightbar_t colour = {(uint8_t)r, (uint8_t)g, (uint8_t)b, 0};
+    const int set = scePadSetLightBar(handle, &colour);
+    scePadClose(handle);
+    reply(client, "%s lightbar handle=0x%x set=0x%08x r=%d g=%d b=%d",
+          set == 0 ? "ok" : "err", handle, (uint32_t)set, r, g, b);
+}
+
 static int handle_command(int client, char *line, const char *body, size_t body_len)
 {
     char report[PS5LOOP_LINE - 64] = {0};
@@ -1633,11 +2678,17 @@ static int handle_command(int client, char *line, const char *body, size_t body_
         reply(client, "err empty");
         return 0;
     }
+    if (strcmp(command, "GET") == 0 || strcmp(command, "HEAD") == 0)
+    {
+        // a browser: serve the live dashboard and its /api/hwinfo over HTTP
+        http_serve_page(client, command, strtok(NULL, " \t"));
+        return 0;
+    }
     if (strcmp(command, "ping") == 0)
     {
-        reply(client, "ok ps5loop 1 pid=%d fw=0x%08x pad=%s probe=0x%llx", (int)getpid(),
+        reply(client, "ok ps5loop 1 pid=%d fw=0x%08x pad=%s probe=0x%llx kproc=0x%lx", (int)getpid(),
               kernel_get_fw_version(), g_pad.open ? "open" : "closed",
-              (unsigned long long)(uintptr_t)g_probe);
+              (unsigned long long)(uintptr_t)g_probe, (long)kernel_get_proc(getpid()));
         return 0;
     }
     if (strcmp(command, "quit") == 0)
@@ -1766,6 +2817,15 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             get_file(client, path);
         return 0;
     }
+    if (strcmp(command, "hash") == 0)
+    {
+        const char *const path = strtok(NULL, " \t");
+        if (path == NULL || path[0] != '/')
+            reply(client, "err usage: hash /PATH");
+        else
+            hash_file(client, path);
+        return 0;
+    }
     if (strcmp(command, "put") == 0)
     {
         const char *const path = strtok(NULL, " \t");
@@ -1818,6 +2878,58 @@ static int handle_command(int client, char *line, const char *body, size_t body_
         close_app(client, strtok(NULL, " \t"));
         return 0;
     }
+    if (strcmp(command, "locate-title") == 0)
+    {
+        locate_title(client);
+        return 0;
+    }
+    if (strcmp(command, "module") == 0)
+    {
+        const char *const pid = strtok(NULL, " \t");
+        const char *const name = strtok(NULL, " \t");
+        if (pid == NULL || name == NULL)
+            reply(client, "err usage: module PID BASENAME");
+        else
+            module_info(client, (pid_t)atoi(pid), name);
+        return 0;
+    }
+    if (strcmp(command, "modules") == 0)
+    {
+        const char *const pid = strtok(NULL, " \t");
+        if (pid == NULL)
+            reply(client, "err usage: modules PID");
+        else
+            module_list(client, (pid_t)atoi(pid));
+        return 0;
+    }
+    if (strcmp(command, "dlsym") == 0)
+    {
+        const char *const pid = strtok(NULL, " \t");
+        const char *const name = strtok(NULL, " \t");
+        const char *const symbol = strtok(NULL, " \t");
+        if (pid == NULL || name == NULL || symbol == NULL)
+            reply(client, "err usage: dlsym PID BASENAME SYMBOL");
+        else
+            dlsym_lookup(client, (pid_t)atoi(pid), name, symbol);
+        return 0;
+    }
+    if (strcmp(command, "call") == 0)
+    {
+        const char *const pid = strtok(NULL, " \t");
+        const char *const addr = strtok(NULL, " \t");
+        if (pid == NULL || addr == NULL)
+            reply(client, "err usage: call PID FUNC_ADDR [ARG0..ARG5]");
+        else
+        {
+            uint64_t args[6] = {0};
+            int nargs = 0;
+            for (const char *tok = strtok(NULL, " \t"); tok != NULL && nargs < 6;
+                 tok = strtok(NULL, " \t"))
+                args[nargs++] = strtoull(tok, NULL, 0);
+            call_in_process(client, (pid_t)atoi(pid), (intptr_t)strtoull(addr, NULL, 0), args, nargs);
+        }
+        return 0;
+    }
     if (strcmp(command, "power") == 0)
     {
         const char *const what = strtok(NULL, " \t");
@@ -1837,6 +2949,24 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             uninstall_app(client, title_id);
         return 0;
     }
+    if (strcmp(command, "install") == 0)
+    {
+        const char *const path = strtok(NULL, " \t");
+        if (path == NULL || path[0] != '/')
+            reply(client, "err usage: install /PATH/TO.pkg");
+        else
+            install_pkg(client, path);
+        return 0;
+    }
+    if (strcmp(command, "exec") == 0)
+    {
+        char *const rest = strtok(NULL, "");
+        if (rest == NULL)
+            reply(client, "err usage: exec /PATH [ARGS]");
+        else
+            exec_command(client, rest);
+        return 0;
+    }
     if (strcmp(command, "notify") == 0)
     {
         const char *const type = strtok(NULL, " \t");
@@ -1854,6 +2984,16 @@ static int handle_command(int client, char *line, const char *body, size_t body_
         hwinfo(client);
         return 0;
     }
+    if (strcmp(command, "setting-set") == 0)
+    {
+        const char *const reg = strtok(NULL, " \t");
+        const char *const value = strtok(NULL, " \t");
+        if (reg == NULL || value == NULL)
+            reply(client, "err usage: setting-set REGID VALUE (REGID hex, from a settings dump)");
+        else
+            setting_set(client, (uint32_t)strtoul(reg, NULL, 0), atoi(value));
+        return 0;
+    }
     if (strcmp(command, "settings") == 0)
     {
         settings_dump(client);
@@ -1862,6 +3002,75 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     if (strcmp(command, "df") == 0)
     {
         df(client);
+        return 0;
+    }
+    if (strcmp(command, "lightbar") == 0)
+    {
+        const char *const r = strtok(NULL, " \t");
+        const char *const g = strtok(NULL, " \t");
+        const char *const b = strtok(NULL, " \t");
+        if (r == NULL || g == NULL || b == NULL)
+            reply(client, "err usage: lightbar R G B (attempts the physical pad)");
+        else
+            lightbar_try(client, atoi(r), atoi(g), atoi(b));
+        return 0;
+    }
+    if (strcmp(command, "led") == 0)
+    {
+        const char *const a0 = strtok(NULL, " \t");
+        if (a0 != NULL && strcmp(a0, "auto") == 0)
+            led_set_effect(client, 0, 0, 0, 0, 0, "auto");
+        else if (a0 != NULL && strcmp(a0, "off") == 0)
+            led_set_effect(client, 1, 0, 0, 0, 0, "off");
+        else if (a0 != NULL && (strcmp(a0, "breathe") == 0 || strcmp(a0, "chase") == 0))
+        {
+            const int chase = strcmp(a0, "chase") == 0;
+            const char *const b = chase ? NULL : strtok(NULL, " \t");
+            const char *const w = chase ? NULL : strtok(NULL, " \t");
+            const char *const m = chase ? NULL : strtok(NULL, " \t");
+            const char *const period = strtok(NULL, " \t");
+            if (!chase && (b == NULL || w == NULL || m == NULL))
+                reply(client, "err usage: led breathe BLUE WHITE AMBER [MS]");
+            else
+                led_set_effect(client, chase ? 3 : 2, chase ? 255 : atoi(b), chase ? 255 : atoi(w),
+                               chase ? 255 : atoi(m), period != NULL ? atoi(period) : 0, a0);
+        }
+        else
+        {
+            const char *const b = strtok(NULL, " \t");
+            const char *const c = strtok(NULL, " \t");
+            if (a0 == NULL || b == NULL || c == NULL)
+                reply(client,
+                      "err usage: led BLUE WHITE AMBER | off | auto | breathe B W A [MS] | chase [MS]");
+            else
+                led_set_effect(client, 1, atoi(a0), atoi(b), atoi(c), 0, "static");
+        }
+        return 0;
+    }
+    if (strcmp(command, "fan") == 0)
+    {
+        const char *const sub = strtok(NULL, " \t");
+        if (sub != NULL && strcmp(sub, "set") == 0)
+            fan_command(client, strtok(NULL, " \t"));
+        else if (sub == NULL)
+            fan_command(client, NULL);
+        else
+            reply(client, "err usage: fan  (read duty) | fan set TEMP (30..90)");
+        return 0;
+    }
+    if (strcmp(command, "beeper") == 0)
+    {
+        const char *const sub = strtok(NULL, " \t");
+        if (sub != NULL && (strcmp(sub, "mute") == 0 || strcmp(sub, "vol") == 0))
+        {
+            const char *const value = strtok(NULL, " \t");
+            if (value == NULL)
+                reply(client, "err usage: beeper mute 0|1 | beeper vol 0..2 | beeper [PATTERN]");
+            else
+                beeper_command(client, sub, atoi(value));
+        }
+        else
+            beeper_command(client, NULL, sub != NULL ? atoi(sub) : 1);
         return 0;
     }
     if (strcmp(command, "kill") == 0)
@@ -1894,6 +3103,81 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             reply(client, "err usage: poke PID ADDR HEX");
         else
             poke(client, (pid_t)atoi(pid), (intptr_t)strtoull(addr, NULL, 0), hex);
+        return 0;
+    }
+    if (strcmp(command, "scan") == 0)
+    {
+        const char *const pid = strtok(NULL, " \t");
+        const char *const addr = strtok(NULL, " \t");
+        const char *const len = strtok(NULL, " \t");
+        const char *const width = strtok(NULL, " \t");
+        const char *const value = strtok(NULL, " \t");
+        if (pid == NULL || addr == NULL || len == NULL || width == NULL || value == NULL)
+            reply(client, "err usage: scan PID ADDR LEN WIDTH VALUE (width 1|2|4|8)");
+        else
+            mem_scan(client, (pid_t)atoi(pid), (intptr_t)strtoull(addr, NULL, 0),
+                     (size_t)strtoull(len, NULL, 0), atoi(width), strtoull(value, NULL, 0));
+        return 0;
+    }
+    if (strcmp(command, "scan-aob") == 0)
+    {
+        const char *const pid = strtok(NULL, " \t");
+        const char *const addr = strtok(NULL, " \t");
+        const char *const len = strtok(NULL, " \t");
+        const char *const pattern = strtok(NULL, " \t");
+        if (pid == NULL || addr == NULL || len == NULL || pattern == NULL)
+            reply(client, "err usage: scan-aob PID ADDR LEN PATTERN (hex, ?? = wildcard)");
+        else
+            mem_scan_aob(client, (pid_t)atoi(pid), (intptr_t)strtoull(addr, NULL, 0),
+                         (size_t)strtoull(len, NULL, 0), pattern);
+        return 0;
+    }
+    if (strcmp(command, "kern-read") == 0)
+    {
+        const char *const addr = strtok(NULL, " \t");
+        const char *const len = strtok(NULL, " \t");
+        if (addr == NULL || len == NULL)
+            reply(client, "err usage: kern-read ADDR LEN");
+        else
+            kern_read(client, (intptr_t)strtoull(addr, NULL, 0), (size_t)strtoull(len, NULL, 0));
+        return 0;
+    }
+    if (strcmp(command, "kern-write") == 0)
+    {
+        const char *const addr = strtok(NULL, " \t");
+        const char *const hex = strtok(NULL, " \t");
+        if (addr == NULL || hex == NULL)
+            reply(client, "err usage: kern-write ADDR HEX");
+        else
+            kern_write(client, (intptr_t)strtoull(addr, NULL, 0), hex);
+        return 0;
+    }
+    if (strcmp(command, "klog-stream") == 0)
+    {
+        const char *const ms = strtok(NULL, " \t");
+        long cap_ms = ms != NULL ? atol(ms) : 0;
+        if (cap_ms < 0 || cap_ms > 600000)
+            cap_ms = 600000;
+        const int log = klog_open();
+        if (log < 0)
+        {
+            reply(client, "err klog: %s", strerror(errno));
+            return 0;
+        }
+        reply(client, "ok klog-stream (until you disconnect)");
+        char buffer[8192];
+        const uint64_t deadline = cap_ms != 0 ? monotonic_us() + (uint64_t)cap_ms * 1000u : 0;
+        for (;;)
+        {
+            const ssize_t bytes = klog_read(log, buffer, sizeof(buffer), 200);
+            if (bytes < 0)
+                break;
+            if (bytes > 0 && send(client, buffer, (size_t)bytes, 0) <= 0)
+                break;
+            if (deadline != 0 && monotonic_us() > deadline)
+                break;
+        }
+        close(log);
         return 0;
     }
     if (strcmp(command, "http") == 0)
@@ -2063,6 +3347,28 @@ static int serve_client(int client)
     return handle_command(client, line, body, body_len);
 }
 
+// Open a bound, listening TCP socket on the command port, or -1. Used at start
+// and to rebind after the network drops across rest/resume.
+static int open_listener(unsigned port)
+{
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
+    int reuse = 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_ANY);
+    address.sin_port = htons((uint16_t)port);
+    if (bind(fd, (struct sockaddr *)&address, sizeof(address)) != 0 || listen(fd, 4) != 0)
+    {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 int main(int argc, char *argv[])
 {
     unsigned port = PS5LOOP_PORT;
@@ -2077,24 +3383,11 @@ int main(int argc, char *argv[])
     log_line("ps5loop: starting, port %u, pid %d, user service 0x%08x", port, (int)getpid(),
              (uint32_t)user_init);
 
-    const int server = socket(AF_INET, SOCK_STREAM, 0);
+    int server = open_listener(port);
     if (server < 0)
-    {
-        log_line("ps5loop: socket: %s", strerror(errno));
-        return 1;
-    }
-    int reuse = 1;
-    (void)setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-    struct sockaddr_in address;
-    memset(&address, 0, sizeof(address));
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_ANY);
-    address.sin_port = htons((uint16_t)port);
-    if (bind(server, (struct sockaddr *)&address, sizeof(address)) != 0 || listen(server, 4) != 0)
     {
         // A second copy finds the port taken and leaves the first one alone.
         log_line("ps5loop: bind or listen failed: %s", strerror(errno));
-        close(server);
         return 1;
     }
     pthread_t inserter;
@@ -2104,6 +3397,16 @@ int main(int argc, char *argv[])
         close(server);
         return 1;
     }
+    pthread_t discoverer;
+    if (pthread_create(&discoverer, NULL, discover_thread, NULL) == 0)
+        pthread_detach(discoverer);
+    else
+        log_line("ps5loop: no discovery beacon: %s", strerror(errno));
+    pthread_t led_animator;
+    if (pthread_create(&led_animator, NULL, led_fx_thread, NULL) == 0)
+        pthread_detach(led_animator);
+    else
+        log_line("ps5loop: no led thread: %s", strerror(errno));
     log_line("ps5loop: listening");
     for (;;)
     {
@@ -2112,8 +3415,18 @@ int main(int argc, char *argv[])
         {
             if (errno == EINTR)
                 continue;
-            log_line("ps5loop: accept failed: %s", strerror(errno));
-            break;
+            // The network can drop across rest/resume; rebind and keep serving
+            // instead of leaving, so the payload survives standby.
+            log_line("ps5loop: accept failed: %s; rebinding", strerror(errno));
+            close(server);
+            server = -1;
+            while (server < 0)
+            {
+                usleep(1000000);
+                server = open_listener(port);
+            }
+            log_line("ps5loop: re-listening");
+            continue;
         }
         const int leaving = serve_client(client);
         close(client);

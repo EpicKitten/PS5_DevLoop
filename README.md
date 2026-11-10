@@ -99,24 +99,50 @@ disable that first.
 | `ps` | list every process, with the app id and title id of the apps |
 | `ls PATH` | list a console directory |
 | `get REMOTE [LOCAL]` | download a console file (default `downloads/<name>`) |
+| `hash PATH` | SHA-256 of a console file, computed on the console (hex) |
 | `put LOCAL REMOTE` | upload a local file to the console |
 | `rm PATH` / `mv SRC DST` | delete, move or rename a console file |
 | `open-url URL` | open a URL in the console's web browser |
 | `launch TITLE_ID` | launch a registered title |
 | `close-app [APP_ID]` | close a running app (id from `ps`, else the foreground one) |
+| `install /PATH.pkg` | install a `.pkg` already on the console |
+| `exec /PATH [ARGS]` | run a console binary and send back its output and exit code |
+| `wake` | wake the console from standby (UDP packet; needs `PS5_WAKE_CREDENTIAL`) |
+| `locate-title` | the foreground app's ids right now (app id, pid, title id, command) |
+| `module PID NAME` / `modules PID` / `dlsym PID NAME SYM` | a named module's mapping, every module in a process, or a symbol's address |
 | `rest` / `reboot` / `power-off` | rest mode, reboot, or power off |
 | `uninstall TITLE_ID` | uninstall a title |
 | `notify TYPE MESSAGE` | an on-screen message: `toast` (banner) or `flyout` (card) |
-| `hwinfo` | model, serial, CPU/SoC temperatures, CPU clock |
+| `hwinfo` | model, serial, CPU temp, all 64 SoC sensors (incl. the hottest), CPU clock |
 | `df` | free space per mounted volume |
+| `led BWA` / `off` / `auto` / `breathe B W A [MS]` / `chase [MS]` | the console indicator LED (static, off, system-controlled, or an animated effect), via `/dev/icc_indicator` |
+| `fan [TEMP]` | read the fan duty, or set the manual threshold (30..90 °C), via `/dev/icc_fan` |
+| `beeper [PATTERN]` / `mute 0\|1` / `vol 0..2` | beep the console, or set its mute / volume (`sceKernelIccSetBuzzer*`) |
 | `kill PID` | end a process (not just a registered app) |
-| `peek PID ADDR LEN` / `poke PID ADDR HEX` | read / write a process's memory |
+| `peek PID ADDR LEN` / `poke PID ADDR HEX` | read / write a process's memory (writes are read back and verified) |
+| `scan PID ADDR LEN W VALUE` | find a `W`-byte integer (`W` = 1/2/4/8) in a span of a process's memory |
+| `scan-aob PID ADDR LEN PATTERN` | find a byte pattern (`??` = wildcard) in a span |
+| `kern-read ADDR LEN` / `kern-write ADDR HEX` | read / write kernel memory by absolute address (writes verified) |
+| `klog-stream [MS]` | stream the kernel log live until you disconnect |
+| `discover [--timeout S]` | find consoles on the LAN by UDP broadcast to the command port |
 | `http URL` | fetch an `http://` URL (saved under `downloads/`) |
 | `settings` | read the system registry (settings) as JSON |
+| `setting-set REGID VALUE` | write one integer setting by its regId (read back and verified) |
 
 Verified on firmware 12.20: `ps`, `ls`/`get`/`put`/`rm`/`mv` (a round trip is
-byte-for-byte), `open-url`, `close-app`, `hwinfo`, `df`, `notify`, `peek`, and
-`http`. Notes and limits:
+byte-for-byte), `hash` (matches `sha256sum` for a 1 MB file and an empty file),
+`open-url`, `close-app`, `locate-title`, `module`/`modules`/`dlsym`, `call`
+(ptrace thread-hijack, proved against a disposable sleeper: `getpid`→its own pid,
+`abs(-5)`→5, target survived), `hwinfo`
+(all 64 SoC sensors answer), `df`, `led`/`fan`/`beeper` (ICC ioctls/calls return
+success, including the `breathe`/`chase`/`auto` effects and beeper `mute`/`vol`),
+`scan`/`scan-aob` (hit a known probe), `kern-read`/`kern-write` and `setting-set`
+(verified), `notify`, `peek`, `http`, the UDP beacon and `klog-stream`, and the
+console-hosted dashboard (`GET /`, `GET /api/hwinfo`). `install` and `exec` are
+wired and fail gracefully on a missing target (a positive run needs a real
+`.pkg` / binary); `wake` and rest-mode survival are host/standby paths not
+exercised in this session.
+Notes and limits:
 
 - **`peek`** reads a process's memory; **`poke`** writes it. Writing the
   payload's own process is refused by the kernel's self-write rule — `poke`
@@ -126,6 +152,11 @@ byte-for-byte), `open-url`, `close-app`, `hwinfo`, `df`, `notify`, `peek`, and
   card. Both are drawn by the system, so they work from the payload. Modal
   dialogs (message, error, on-screen keyboard) are not here: they render into
   the calling app's own framebuffer, which a background payload does not have.
+- **`lightbar R G B`** attempts the *physical* DualSense lightbar as a
+  diagnostic. On 12.20 scePad initialises (`init=0`) but `scePadOpen` returns
+  `0x809b0081` (ALREADY_OPENED): SceShellUI owns the pad, so the payload cannot
+  set its lightbar/haptics. The console's own body LED (`led`, via
+  `/dev/icc_indicator`) is separate and does work.
 - **`settings`** reads the registry by scanning regIds (`(cat << 24) | (sub <<
   16) | entry`) with `sceRegMgrGetInt`/`GetStr`, keyed by regId in hex. It
   covers the readable int and string values across every category; binary
@@ -147,18 +178,29 @@ byte-for-byte), `open-url`, `close-app`, `hwinfo`, `df`, `notify`, `peek`, and
 
 ## Live dashboard
 
-`tools/ps5web.py` is a companion web dashboard that shows the console's hardware
-info live: the model, CPU and SoC temperatures (as gauges and a rolling chart),
-and the CPU clock.
+The payload hosts a live hardware dashboard itself: it answers HTTP on the same
+port as the command protocol (9112), so a browser opens it directly.
 
-```bash
-tools/ps5web.py            # serves http://127.0.0.1:8099, then open it
+```
+http://<console>:9112/          # the dashboard
+http://<console>:9112/api/hwinfo # the JSON it polls
 ```
 
-A browser cannot reach the console's raw port, so the script is the bridge: it
-serves the page and a `/api/hwinfo` endpoint that polls the payload. It uses the
-same `PS5_HOST`/`.env` as `ps5loop.py`, and never sends the console's address to
-the browser.
+It shows the model, the CPU temperature and **every SoC sensor** (gauges, a grid
+of all readings, and a rolling chart of the CPU and the hottest SoC sensor), and
+the CPU clock. The page is embedded in the payload (`tools/ps5web.html` →
+`payload/dashboard_html.h`, regenerated by `tools/embed_dashboard.py`), so no
+host-side server is needed.
+
+`tools/ps5web.py` is an optional proxy, for viewing on localhost or keeping the
+console's address out of the browser:
+
+```bash
+tools/ps5web.py            # serves http://127.0.0.1:8099, forwards to the console
+```
+
+It uses the same `PS5_HOST`/`.env` as `ps5loop.py`, and never sends the console's
+address to the browser.
 
 ## How it works
 

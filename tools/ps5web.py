@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-# PS5 DevLoop - a companion web dashboard that shows the console's hardware info
-# live (model, temperatures, CPU clock).
+# PS5 DevLoop - optional localhost proxy for the console-hosted dashboard.
 # Copyright (C) 2026 Gary Riches
 # SPDX-License-Identifier: GPL-3.0-or-later
-"""Serve a small dashboard that polls the console's `hwinfo` and draws it live.
+"""The live dashboard is now hosted by the console itself: the payload answers
+HTTP on its own port, so a browser can open it directly (see README).
 
-A browser cannot open the console's raw TCP port, so this is the bridge: it
-serves the page and a /api/hwinfo endpoint that talks to the payload for it.
+This bridge is optional. It proxies the console's HTTP to 127.0.0.1, for when
+you would rather view it on localhost, or keep the console's address out of the
+browser. It forwards each request to the payload and relays the reply.
 
   tools/ps5web.py [--port N]     -> http://127.0.0.1:8099
 
@@ -15,53 +16,46 @@ sent to the browser.
 """
 
 import argparse
-import json
-import re
+import socket
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 sys.path.insert(0, str(HERE))
-from ps5loop import command, console_host  # reuse the console connection  # noqa: E402
+from ps5loop import console_host, PORT  # reuse the console connection  # noqa: E402
 
 
-def hwinfo():
-    """Ask the payload for hwinfo and parse its one line into a dict."""
-    answer, _ = command("hwinfo", timeout=10)
-    if not answer.startswith("ok"):
-        return {"ok": False, "error": answer}
-
-    def grab(pattern, cast=str):
-        found = re.search(pattern, answer)
-        return cast(found.group(1)) if found else None
-
-    return {
-        "ok": True,
-        "fw": grab(r"fw=(\S+)"),
-        # model's value has a space ("CFI-2015 B01X"), so read up to " serial=".
-        "model": grab(r"model=(.*?) serial="),
-        "serial": grab(r"serial=(\S+)"),
-        "cpuC": grab(r"cpuC=(-?\d+)", int),
-        "socC": grab(r"socC=(-?\d+)", int),
-        "cpuMHz": grab(r"cpuMHz=(-?\d+)", int),
-    }
+def fetch(path):
+    """Forward a GET to the console's HTTP and return (status, headers, body)."""
+    with socket.create_connection((console_host(), PORT), timeout=10) as sock:
+        sock.sendall(
+            f"GET {path} HTTP/1.1\r\nHost: ps5\r\nConnection: close\r\n\r\n".encode())
+        raw = b""
+        while True:
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            raw += chunk
+    head, _, body = raw.partition(b"\r\n\r\n")
+    lines = head.split(b"\r\n")
+    status = int(lines[0].split(b" ")[1]) if len(lines[0].split(b" ")) > 1 else 502
+    headers = {}
+    for line in lines[1:]:
+        key, _, value = line.partition(b":")
+        headers[key.strip().lower().decode()] = value.strip().decode()
+    return status, headers, body
 
 
 class Handler(BaseHTTPRequestHandler):
     def do_GET(self):
-        if self.path in ("/", "/index.html"):
-            self._send(200, "text/html; charset=utf-8", (HERE / "ps5web.html").read_bytes())
-        elif self.path == "/api/hwinfo":
-            try:
-                data = hwinfo()
-            except SystemExit as error:
-                data = {"ok": False, "error": str(error)}
-            except OSError as error:
-                data = {"ok": False, "error": f"{error}"}
-            self._send(200, "application/json", json.dumps(data).encode())
-        else:
-            self._send(404, "text/plain; charset=utf-8", b"not found")
+        try:
+            status, headers, body = fetch(self.path)
+        except (OSError, SystemExit) as error:
+            body = str(error).encode()
+            self._send(502, "text/plain; charset=utf-8", body)
+            return
+        self._send(status, headers.get("content-type", "application/octet-stream"), body)
 
     def _send(self, code, content_type, body):
         self.send_response(code)
@@ -82,7 +76,7 @@ def main():
     args = parser.parse_args()
     console_host()  # fail early, before the browser opens, if no host is set
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"PS5 DevLoop dashboard: http://127.0.0.1:{args.port}  (Ctrl+C to stop)")
+    print(f"PS5 DevLoop dashboard (proxy): http://127.0.0.1:{args.port}  (Ctrl+C to stop)")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
