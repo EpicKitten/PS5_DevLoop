@@ -152,7 +152,8 @@
   .shotcap { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 4px 14px;
     color: var(--muted); font-size: 12px; margin-bottom: 6px; }
   .shotcap b { color: var(--text); font-weight: 600; }
-  .shotcap a { color: var(--accent); margin-left: 12px; }
+  .shotcap a { color: var(--accent); margin-right: 12px; }
+  .shotcap span:last-child { display: inline-flex; align-items: center; }
   .gallery { display: grid; gap: 6px; margin: 4px 0 10px; }
   .gallery:empty { display: none; }
   .gitem { display: flex; align-items: center; gap: 10px; padding: 6px 8px; border: 1px solid var(--line);
@@ -302,7 +303,6 @@
       </div>
     </div>
     <pre id="out">Ready. Commands run on the console through GET /api/run.</pre>
-    <div id="shot"></div>
     <div class="row" style="margin-top:12px">
       <input id="raw" placeholder="any command, e.g. pad tap 4000 120">
       <button class="go" onclick="runIf('raw', c => c)">Run</button>
@@ -372,11 +372,12 @@
         <button onclick="run('latest-capture')">Latest capture</button>
         <button onclick="loadGallery()">Captures gallery</button>
       </div>
-      <div class="hint">Screenshot needs the pad open (it holds Create). The whole screen; ~3 s. Pictures appear under the console output; HDR captures (JXR) are decoded in the page.</div>
+      <div class="hint">Screenshot needs the pad open (it holds Create). The whole screen; ~3 s. Pictures appear at the bottom of this card; HDR captures (JXR) are decoded in the page.</div>
       <div id="gallery" class="gallery"></div>
       <div class="row"><label>Request</label><input id="fr-req" placeholder="/data/homebrew/PPSA.../devloop-shot"></div>
       <div class="row"><label>Folder</label><input id="fr-dir" placeholder="/data/homebrew/PPSA.../screenshots"></div>
       <div class="row"><button class="go wide" onclick="frame()">Frame (title's own)</button></div>
+      <div id="shot"></div>
     </div>
 
     <!-- apps -->
@@ -1032,7 +1033,7 @@ async function run(cmd) {
       const blob = await r.blob();
       logLine("  → image (" + blob.size + " bytes, " + type + ")", "ok");
       const shown = await showPicture(blob, type, pictureName(cmd, type));
-      logLine("  → shown below: " + shown.width + "×" + shown.height + ", " + shown.kind, "ok");
+      logLine("  → shown in Sight: " + shown.width + "×" + shown.height + ", " + shown.kind, "ok");
     } else {
       const text = (await r.text()).replace(/\s+$/, "");
       const cls = /^ok\b/.test(text) ? "ok" : /^err\b/.test(text) ? "err" : "";
@@ -1043,7 +1044,7 @@ async function run(cmd) {
   }
 }
 
-// ---- pictures: the viewer under the console output, and the captures gallery ----
+// ---- pictures: the viewer at the foot of the Sight card, and the captures gallery ----
 // A browser shows JPEG and PNG itself. With HDR on the console writes JPEG XR,
 // which no browser reads, so the page decodes those (jpegxr, above) to a PNG.
 let jxrCodec = null;             // the decoder, started on first use
@@ -1143,9 +1144,19 @@ async function showPicture(blob, type, name) {
   const link = document.createElement("a");
   link.href = viewUrl; link.target = "_blank"; link.rel = "noopener"; link.title = "Open full size";
   link.appendChild(img);
+  const close = document.createElement("button");
+  close.className = "mini"; close.textContent = "Close"; close.title = "Remove the picture";
+  close.onclick = clearPicture;
+  cap.lastElementChild.append(close);
   shot.innerHTML = "";
   shot.append(cap, link);
   return { width: img.naturalWidth, height: img.naturalHeight, kind };
+}
+
+function clearPicture() {
+  shotUrls.forEach(u => URL.revokeObjectURL(u));
+  shotUrls = [];
+  shot.innerHTML = "";
 }
 
 // A name for a picture a command returned: the file's own for "get", else the verb and the time.
@@ -1338,7 +1349,7 @@ function getFile() {
   window.open("/api/run?c=" + encodeURIComponent("get " + p), "_blank");
 }
 
-document.getElementById("clear").onclick = () => { out.textContent = ""; out.dataset.virgin = "1"; shot.innerHTML = ""; };
+document.getElementById("clear").onclick = () => { out.textContent = ""; out.dataset.virgin = "1"; };
 
 window.addEventListener("resize", resizeCharts);
 poll();
