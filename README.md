@@ -152,6 +152,11 @@ Notes and limits:
   card. Both are drawn by the system, so they work from the payload. Modal
   dialogs (message, error, on-screen keyboard) are not here: they render into
   the calling app's own framebuffer, which a background payload does not have.
+- **`lightbar R G B`** attempts the *physical* DualSense lightbar as a
+  diagnostic. On 12.20 scePad initialises (`init=0`) but `scePadOpen` returns
+  `0x809b0081` (ALREADY_OPENED): SceShellUI owns the pad, so the payload cannot
+  set its lightbar/haptics. The console's own body LED (`led`, via
+  `/dev/icc_indicator`) is separate and does work.
 - **`settings`** reads the registry by scanning regIds (`(cat << 24) | (sub <<
   16) | entry`) with `sceRegMgrGetInt`/`GetStr`, keyed by regId in hex. It
   covers the readable int and string values across every category; binary

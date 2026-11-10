@@ -55,6 +55,7 @@
  *   hwinfo                    model, serial, cpu + all SoC temperatures, cpu clock
  *   df                        free space per mounted volume
  *   led BWA|off|auto|breathe B W A [MS]|chase [MS]   the console indicator LED
+ *   lightbar R G B            attempt the physical pad lightbar (shell owns it)
  *   fan [set TEMP]            read the fan duty, or set the threshold (30..90 C)
  *   beeper [PATTERN]|mute 0|1|vol 0..2   beep, mute, or set the beeper volume
  *   GET / , GET /api/hwinfo   a browser gets the live dashboard, hosted here
@@ -217,6 +218,13 @@ extern int32_t scePadVirtualDeviceInsertData(int32_t handle, const void *data);
 extern int32_t scePadVirtualDeviceDeleteDevice(int32_t handle);
 extern int sceUserServiceInitialize(void *param);
 extern int sceUserServiceGetForegroundUser(int *user_id);
+
+/* The physical DualSense, to attempt lightbar control (SceShellUI owns it). */
+typedef struct pad_lightbar { uint8_t r, g, b, reserve; } pad_lightbar_t;
+extern int scePadInit(void);
+extern int scePadOpen(int user_id, int type, int index, void *param);
+extern int scePadClose(int handle);
+extern int scePadSetLightBar(int handle, pad_lightbar_t *param);
 
 /* libSceMbus, resolved at run time. */
 static int32_t (*mbus_bind)(uint64_t device_id, int32_t user_id);
@@ -2636,6 +2644,31 @@ static void http_serve_page(int client, const char *verb, const char *url)
     http_send(client, "404 Not Found", "text/plain; charset=utf-8", "not found", 9, head_only);
 }
 
+// lightbar: attempt the *physical* DualSense lightbar. SceShellUI owns the pad
+// session, so scePadOpen is expected to answer 0x809b0081 (already open) and
+// there is no handle to set a colour on. This command exists to demonstrate that
+// directly rather than only asserting it; if a firmware ever frees the pad, it
+// also becomes a real control.
+static void lightbar_try(int client, int r, int g, int b)
+{
+    const int init = scePadInit();
+    int user = -1;
+    (void)sceUserServiceGetForegroundUser(&user);
+    const int handle = scePadOpen(user, 0 /* SCE_PAD_PORT_TYPE_STANDARD */, 0, NULL);
+    if (handle < 0)
+    {
+        reply(client,
+              "err lightbar: init=0x%08x scePadOpen user=0x%08x result=0x%08x — SceShellUI owns the pad",
+              (uint32_t)init, (uint32_t)user, (uint32_t)handle);
+        return;
+    }
+    pad_lightbar_t colour = {(uint8_t)r, (uint8_t)g, (uint8_t)b, 0};
+    const int set = scePadSetLightBar(handle, &colour);
+    scePadClose(handle);
+    reply(client, "%s lightbar handle=0x%x set=0x%08x r=%d g=%d b=%d",
+          set == 0 ? "ok" : "err", handle, (uint32_t)set, r, g, b);
+}
+
 static int handle_command(int client, char *line, const char *body, size_t body_len)
 {
     char report[PS5LOOP_LINE - 64] = {0};
@@ -2969,6 +3002,17 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     if (strcmp(command, "df") == 0)
     {
         df(client);
+        return 0;
+    }
+    if (strcmp(command, "lightbar") == 0)
+    {
+        const char *const r = strtok(NULL, " \t");
+        const char *const g = strtok(NULL, " \t");
+        const char *const b = strtok(NULL, " \t");
+        if (r == NULL || g == NULL || b == NULL)
+            reply(client, "err usage: lightbar R G B (attempts the physical pad)");
+        else
+            lightbar_try(client, atoi(r), atoi(g), atoi(b));
         return 0;
     }
     if (strcmp(command, "led") == 0)

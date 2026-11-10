@@ -52,6 +52,7 @@ Commands:
   hwinfo                model, serial, temperatures and cpu clock
   df                    free space per mounted volume
   led ...               indicator LED: BLUE WHITE AMBER | off | auto | breathe B W A [MS] | chase [MS]
+  lightbar R G B        attempt the physical DualSense lightbar (SceShellUI owns the pad)
   fan [TEMP]            read the fan duty, or set the threshold (30..90 C)
   beeper [PATTERN|mute 0|1|vol 0..2]   beep, mute, or set the beeper volume
   kill PID              end a process by pid
@@ -536,6 +537,10 @@ def main():
     commands.add_parser("df")
     commands.add_parser("led").add_argument("args", nargs="+",
         help="BLUE WHITE AMBER | off | auto | breathe B W A [MS] | chase [MS]")
+    lightbar = commands.add_parser("lightbar")
+    lightbar.add_argument("r", type=int)
+    lightbar.add_argument("g", type=int)
+    lightbar.add_argument("b", type=int)
     fanning = commands.add_parser("fan")
     fanning.add_argument("temp", nargs="?", help="omit to read; a number to set the threshold (30..90)")
     commands.add_parser("beeper").add_argument("args", nargs="*", help="[PATTERN] | mute 0|1 | vol 0..2")
@@ -659,6 +664,8 @@ def main():
         return fetch_text("df")
     if args.command == "led":
         return say(command("led " + " ".join(args.args))[0])
+    if args.command == "lightbar":
+        return say(command(f"lightbar {args.r} {args.g} {args.b}")[0])
     if args.command == "fan":
         return say(command(f"fan set {args.temp}" if args.temp else "fan")[0])
     if args.command == "beeper":

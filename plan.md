@@ -36,7 +36,9 @@ Legend: **done** = implemented and verified on firmware 12.20.
 - **Hardware** — `hwinfo` (model, serial, CPU temp, all 64 SoC sensors + the
   hottest, CPU clock), `df`, `led` (indicator LED via `/dev/icc_indicator`:
   static, `off`, `auto`, `breathe`, `chase`), `fan` (duty read / threshold set
-  via `/dev/icc_fan`), `beeper` (`sceKernelIccSetBuzzer*`: beep, `mute`, `vol`).
+  via `/dev/icc_fan`), `beeper` (`sceKernelIccSetBuzzer*`: beep, `mute`, `vol`),
+  `lightbar R G B` (a diagnostic that attempts the *physical* pad lightbar and
+  reports the shell-ownership refusal; see "Not possible" below).
 - **Settings** — `settings` (read the registry as JSON), `setting-set REGID
   VALUE` (write one integer, read back and verified).
 - **Notifications** — `notify toast|flyout "MSG"`.
@@ -68,11 +70,14 @@ are the honest edge of what this design reaches.
 
 - **DualSense lightbar / rumble / triggers** — `scePadSetLightBar`,
   `scePadSetVibration`, `scePadSetTriggerEffect` need a `scePad` handle to the
-  *physical* controller, which SceShellUI owns exclusively (`scePadOpen` →
-  `0x809b0081`, measured on 12.20). The only path is to reverse-engineer and
-  bridge into SceShellUI's pad session (as PS5-Suite does) — a project in itself.
-  *The console's own body LED is controllable via `/dev/icc_indicator` (`led`);
-  this item is only the pad's own LEDs/haptics.*
+  *physical* controller, which SceShellUI owns exclusively. The `lightbar R G B`
+  command makes this concrete rather than asserted: it initializes scePad
+  (`init=0`) and attempts `scePadOpen` for the foreground user, which answers
+  `0x809b0081` (ALREADY_OPENED) — demonstrated live on 12.20 this session. The
+  only path to control is to reverse-engineer and bridge into SceShellUI's pad
+  session (as PS5-Suite does) — a project in itself. *The console's own body LED
+  is controllable via `/dev/icc_indicator` (`led`); this is only the pad's own
+  LEDs/haptics.*
 - **Modal dialogs** — `sceMsgDialog` / `sceErrorDialog` / `sceImeDialog` are
   CommonDialog dialogs that draw into the *calling* process's framebuffer and
   must be pumped from its render loop; a background payload has no video context,
@@ -112,6 +117,12 @@ exists, which it now is).
   (`rax=0x1a0`), `call abs(-5)` returned `0x5`, and the target survived the
   thread-hijack. ptrace is not restricted on 12.20. The earlier capability work
   (`ps`, files, `notify`, `peek`, `http`, power, apps) was verified when it landed.
+- **Demonstrated impossible on hardware (12.20):** `lightbar` initialised scePad
+  (`init=0`) and then `scePadOpen` returned `0x809b0081` (ALREADY_OPENED) for the
+  foreground user — concrete proof the physical pad is shell-owned, so the pad
+  lightbar/haptics cannot be driven from the payload. The remaining two limits
+  (modal dialogs, live framebuffer) have no API that can even be invoked from a
+  background payload to attempt — a missing subsystem, not a refused call.
 - **Confirmed by code, not run live** (running them would disturb a live title or
   cut access): write-verify readback for `poke` / `kern-write` / `setting-set`
   (each reports `verify=ok|mismatch`), and rest/resume survival (the accept loop
