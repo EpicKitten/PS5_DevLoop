@@ -145,6 +145,21 @@ byte-for-byte), `open-url`, `close-app`, `hwinfo`, `df`, `notify`, `peek`, and
   wake is a host-side Remote Play packet that needs the console's pairing
   credentials.
 
+## Live dashboard
+
+`tools/ps5web.py` is a companion web dashboard that shows the console's hardware
+info live: the model, CPU and SoC temperatures (as gauges and a rolling chart),
+and the CPU clock.
+
+```bash
+tools/ps5web.py            # serves http://127.0.0.1:8099, then open it
+```
+
+A browser cannot reach the console's raw port, so the script is the bridge: it
+serves the page and a `/api/hwinfo` endpoint that polls the payload. It uses the
+same `PS5_HOST`/`.env` as `ps5loop.py`, and never sends the console's address to
+the browser.
+
 ## How it works
 
 - **Input** is the system's virtual pad device (`scePadVirtualDevice*`, what

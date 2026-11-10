@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PS5 DevLoop — Live</title>
+<style>
+  :root {
+    --bg: #0a0e16; --panel: #141b28; --panel2: #1b2433; --line: #26324a;
+    --text: #e6edf6; --muted: #8696ad; --accent: #2e8bff;
+    --cool: #46d1a2; --warm: #f2c14e; --hot: #f2584e;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: radial-gradient(1200px 600px at 50% -10%, #12203a 0%, var(--bg) 60%);
+    color: var(--text); font: 15px/1.4 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    min-height: 100vh; padding: 20px 16px 40px;
+  }
+  .wrap { max-width: 920px; margin: 0 auto; }
+  header { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
+  header h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: .2px; }
+  header .sub { color: var(--muted); font-size: 13px; }
+  .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); box-shadow: 0 0 0 0 transparent; }
+  .dot.ok { background: var(--cool); box-shadow: 0 0 12px var(--cool); }
+  .dot.bad { background: var(--hot); box-shadow: 0 0 12px var(--hot); }
+  .meta { display: flex; flex-wrap: wrap; gap: 8px 22px; color: var(--muted); font-size: 13px; margin: 10px 2px 18px; }
+  .meta b { color: var(--text); font-weight: 600; }
+  .grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
+  @media (max-width: 680px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: linear-gradient(180deg, var(--panel2), var(--panel));
+    border: 1px solid var(--line); border-radius: 16px; padding: 18px 16px;
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+  }
+  .card .label { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .8px; }
+  .gauge { width: 100%; max-width: 220px; }
+  .gauge .val { font-size: 40px; font-weight: 700; }
+  .gauge .unit { font-size: 16px; color: var(--muted); font-weight: 500; }
+  .clock .big { font-size: 46px; font-weight: 700; margin: 8px 0 2px; font-variant-numeric: tabular-nums; }
+  .clock .unit { color: var(--muted); font-size: 14px; }
+  .chart-card { margin-top: 14px; padding: 16px; }
+  .chart-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  .chart-head .label { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .8px; }
+  .legend { display: flex; gap: 16px; font-size: 13px; color: var(--muted); }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
+  canvas { width: 100%; height: 180px; display: block; }
+  footer { color: var(--muted); font-size: 12px; margin-top: 18px; text-align: center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <span class="dot" id="dot"></span>
+    <h1>PS5 DevLoop</h1>
+    <span class="sub" id="status">connecting…</span>
+  </header>
+  <div class="meta">
+    <span>Model <b id="model">—</b></span>
+    <span>Firmware <b id="fw">—</b></span>
+    <span>Serial <b id="serial">—</b></span>
+  </div>
+
+  <div class="grid">
+    <div class="card">
+      <div class="label">CPU temp</div>
+      <svg class="gauge" viewBox="0 0 120 78" id="g-cpu">
+        <path d="M10 62 A50 50 0 0 1 110 62" fill="none" stroke="#223049" stroke-width="10" stroke-linecap="round"/>
+        <path d="M10 62 A50 50 0 0 1 110 62" fill="none" stroke="var(--cool)" stroke-width="10"
+              stroke-linecap="round" class="arc" pathLength="100" stroke-dasharray="100" stroke-dashoffset="100"/>
+        <text x="60" y="58" text-anchor="middle" class="val" fill="currentColor">—<tspan class="unit">°C</tspan></text>
+      </svg>
+    </div>
+    <div class="card">
+      <div class="label">SoC temp</div>
+      <svg class="gauge" viewBox="0 0 120 78" id="g-soc">
+        <path d="M10 62 A50 50 0 0 1 110 62" fill="none" stroke="#223049" stroke-width="10" stroke-linecap="round"/>
+        <path d="M10 62 A50 50 0 0 1 110 62" fill="none" stroke="var(--cool)" stroke-width="10"
+              stroke-linecap="round" class="arc" pathLength="100" stroke-dasharray="100" stroke-dashoffset="100"/>
+        <text x="60" y="58" text-anchor="middle" class="val" fill="currentColor">—<tspan class="unit">°C</tspan></text>
+      </svg>
+    </div>
+    <div class="card clock">
+      <div class="label">CPU clock</div>
+      <div class="big" id="mhz">—</div>
+      <div class="unit">MHz</div>
+    </div>
+  </div>
+
+  <div class="card chart-card">
+    <div class="chart-head">
+      <span class="label">Temperature history</span>
+      <span class="legend">
+        <span><i class="swatch" style="background:#46d1ff"></i>CPU</span>
+        <span><i class="swatch" style="background:#f2c14e"></i>SoC</span>
+      </span>
+    </div>
+    <canvas id="chart"></canvas>
+  </div>
+
+  <footer>Polling the console every 2&nbsp;s · hardware info via the DevLoop payload</footer>
+</div>
+
+<script>
+const MAX = 120;                 // ~4 minutes of 2 s samples
+const hist = { cpu: [], soc: [] };
+const zone = t => t == null ? "var(--cool)" : t >= 75 ? "var(--hot)" : t >= 58 ? "var(--warm)" : "var(--cool)";
+
+function setGauge(id, temp) {
+  const g = document.getElementById(id);
+  const arc = g.querySelector(".arc");
+  const text = g.querySelector(".val");
+  const frac = temp == null ? 0 : Math.max(0, Math.min(1, temp / 90));
+  arc.setAttribute("stroke-dashoffset", String(100 - frac * 100));
+  arc.setAttribute("stroke", zone(temp));
+  g.style.color = zone(temp);
+  text.firstChild.nodeValue = temp == null ? "—" : String(temp);
+}
+
+function drawChart() {
+  const c = document.getElementById("chart");
+  const dpr = window.devicePixelRatio || 1;
+  const w = c.clientWidth, h = c.clientHeight;
+  c.width = w * dpr; c.height = h * dpr;
+  const x = c.getContext("2d"); x.scale(dpr, dpr);
+  x.clearRect(0, 0, w, h);
+  const pad = 26, maxT = 90;
+  const px = i => pad + (w - pad - 8) * (i / (MAX - 1));
+  const py = t => (h - 18) - (h - 28) * (t / maxT);
+  // grid + labels
+  x.strokeStyle = "#1e2a40"; x.fillStyle = "#6b7a92";
+  x.font = "11px sans-serif"; x.lineWidth = 1;
+  for (let t = 0; t <= maxT; t += 30) {
+    x.beginPath(); x.moveTo(pad, py(t)); x.lineTo(w - 8, py(t)); x.stroke();
+    x.fillText(t + "°", 4, py(t) + 3);
+  }
+  const line = (arr, color) => {
+    if (!arr.length) return;
+    x.strokeStyle = color; x.lineWidth = 2; x.beginPath();
+    const start = MAX - arr.length;
+    arr.forEach((t, i) => {
+      const X = px(start + i), Y = py(t);
+      i ? x.lineTo(X, Y) : x.moveTo(X, Y);
+    });
+    x.stroke();
+  };
+  line(hist.cpu, "#46d1ff");
+  line(hist.soc, "#f2c14e");
+}
+
+function status(ok, msg) {
+  const dot = document.getElementById("dot");
+  dot.className = "dot " + (ok ? "ok" : "bad");
+  document.getElementById("status").textContent = msg;
+}
+
+async function poll() {
+  try {
+    const r = await fetch("/api/hwinfo", { cache: "no-store" });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || "error");
+    document.getElementById("model").textContent = d.model || "—";
+    document.getElementById("fw").textContent = d.fw || "—";
+    document.getElementById("serial").textContent = d.serial || "—";
+    document.getElementById("mhz").textContent = d.cpuMHz == null ? "—" : d.cpuMHz;
+    setGauge("g-cpu", d.cpuC);
+    setGauge("g-soc", d.socC);
+    if (d.cpuC != null) { hist.cpu.push(d.cpuC); if (hist.cpu.length > MAX) hist.cpu.shift(); }
+    if (d.socC != null) { hist.soc.push(d.socC); if (hist.soc.length > MAX) hist.soc.shift(); }
+    drawChart();
+    status(true, "connected · " + new Date().toLocaleTimeString());
+  } catch (e) {
+    status(false, "disconnected (" + e.message + ")");
+  }
+}
+
+window.addEventListener("resize", drawChart);
+poll();
+setInterval(poll, 2000);
+</script>
+</body>
+</html>
