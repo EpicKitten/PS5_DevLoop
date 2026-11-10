@@ -42,6 +42,9 @@
  *   open-url URL              open a URL in the web browser
  *   launch TITLE_ID           launch a registered title
  *   close-app [APP_ID]        close a running app (default: the foreground one)
+ *   locate-title              the foreground app's ids (app id, pid, title id)
+ *   module PID BASENAME       where a module is mapped in a process
+ *   dlsym PID BASENAME SYM    resolve a symbol's address in a process
  *   uninstall TITLE_ID        uninstall a title
  *   power off|reboot|rest     power off, reboot, or enter rest mode
  *   notify TYPE MESSAGE       show a message: TYPE is toast or flyout
@@ -1495,6 +1498,79 @@ static void close_app(int client, const char *app_id_text)
           (uint32_t)result);
 }
 
+// locate-title: what is in the foreground right now. The running "big app" gives
+// the app id; the process list maps it to a pid, title id and command.
+static void locate_title(int client)
+{
+    ensure_elevated();
+    const int big = sceSystemServiceGetAppIdOfRunningBigApp();
+    if (big <= 0)
+    {
+        reply(client, "ok locate-title none (no foreground app)");
+        return;
+    }
+    const uint32_t app_id = (uint32_t)big;
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PROC, 0};
+    size_t len = 0;
+    char title[12] = "-", comm[32] = "-";
+    int found_pid = -1;
+    if (sysctl(mib, 4, NULL, &len, NULL, 0) == 0)
+    {
+        char *const procs = malloc(len);
+        if (procs != NULL && sysctl(mib, 4, procs, &len, NULL, 0) == 0)
+        {
+            for (char *ptr = procs; ptr + sizeof(struct kinfo_proc) <= procs + len;)
+            {
+                const struct kinfo_proc *const ki = (const struct kinfo_proc *)ptr;
+                if (ki->ki_structsize == 0)
+                    break;
+                ptr += ki->ki_structsize;
+                app_info_t info;
+                if (sceKernelGetAppInfo(ki->ki_pid, &info) == 0 && info.app_id == app_id)
+                {
+                    found_pid = ki->ki_pid;
+                    snprintf(title, sizeof(title), "%s", info.title_id[0] != '\0' ? info.title_id : "-");
+                    snprintf(comm, sizeof(comm), "%s", ki->ki_comm);
+                    break;
+                }
+            }
+        }
+        free(procs);
+    }
+    reply(client, "ok locate-title appId=0x%x pid=%d titleId=%s comm=%s", app_id, found_pid, title,
+          comm);
+}
+
+// module / dlsym: where a named shared object is mapped in a process, and the
+// address of a symbol in it. kernel_dynlib_* read another process's link map.
+static void module_info(int client, pid_t pid, const char *basename)
+{
+    uint32_t handle = 0;
+    if (kernel_dynlib_handle(pid, basename, &handle) != 0)
+    {
+        reply(client, "err module pid=%d %s: not found", (int)pid, basename);
+        return;
+    }
+    reply(client, "ok module pid=%d %s handle=0x%x base=0x%lx entry=0x%lx", (int)pid, basename,
+          handle, (long)kernel_dynlib_mapbase_addr(pid, handle),
+          (long)kernel_dynlib_entry_addr(pid, handle));
+}
+
+static void dlsym_lookup(int client, pid_t pid, const char *basename, const char *symbol)
+{
+    uint32_t handle = 0;
+    if (kernel_dynlib_handle(pid, basename, &handle) != 0)
+    {
+        reply(client, "err dlsym pid=%d %s: module not found", (int)pid, basename);
+        return;
+    }
+    const intptr_t addr = kernel_dynlib_dlsym(pid, handle, symbol);
+    if (addr == 0)
+        reply(client, "err dlsym pid=%d %s %s: not found", (int)pid, basename, symbol);
+    else
+        reply(client, "ok dlsym pid=%d %s %s=0x%lx", (int)pid, basename, symbol, (long)addr);
+}
+
 // Power: off and reboot do not return when they take; standby is "rest". The
 // reply goes out first, since the request may end the process before it would.
 int sceSystemServiceRequestPowerOff(void);
@@ -2324,6 +2400,32 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     if (strcmp(command, "close-app") == 0)
     {
         close_app(client, strtok(NULL, " \t"));
+        return 0;
+    }
+    if (strcmp(command, "locate-title") == 0)
+    {
+        locate_title(client);
+        return 0;
+    }
+    if (strcmp(command, "module") == 0)
+    {
+        const char *const pid = strtok(NULL, " \t");
+        const char *const name = strtok(NULL, " \t");
+        if (pid == NULL || name == NULL)
+            reply(client, "err usage: module PID BASENAME");
+        else
+            module_info(client, (pid_t)atoi(pid), name);
+        return 0;
+    }
+    if (strcmp(command, "dlsym") == 0)
+    {
+        const char *const pid = strtok(NULL, " \t");
+        const char *const name = strtok(NULL, " \t");
+        const char *const symbol = strtok(NULL, " \t");
+        if (pid == NULL || name == NULL || symbol == NULL)
+            reply(client, "err usage: dlsym PID BASENAME SYMBOL");
+        else
+            dlsym_lookup(client, (pid_t)atoi(pid), name, symbol);
         return 0;
     }
     if (strcmp(command, "power") == 0)

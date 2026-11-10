@@ -38,6 +38,9 @@ Commands:
   open-url URL          open a URL in the console's web browser
   launch TITLE_ID       launch an installed title
   close-app [APP_ID]    close a running app (app id from ps; else the big app)
+  locate-title          what is in the foreground now (app id, pid, title id)
+  module PID NAME       where a module is mapped in a process (base, entry)
+  dlsym PID NAME SYM    resolve a symbol's address in a process
   rest / reboot / power-off   put the console in rest mode, reboot, or power off
   uninstall TITLE_ID    uninstall a title (registered titles; irreversible)
   notify TYPE MESSAGE   show a message: TYPE is toast (banner) or flyout (card)
@@ -458,6 +461,14 @@ def main():
     commands.add_parser("launch").add_argument("title_id")
     commands.add_parser("close-app").add_argument("app_id", nargs="?",
                                                  help="an app id from ps; omitted, the running big app")
+    commands.add_parser("locate-title")
+    moduling = commands.add_parser("module")
+    moduling.add_argument("pid")
+    moduling.add_argument("name", help="a module basename, e.g. libc.sprx")
+    dlsyming = commands.add_parser("dlsym")
+    dlsyming.add_argument("pid")
+    dlsyming.add_argument("name", help="a module basename")
+    dlsyming.add_argument("symbol")
     commands.add_parser("rest")
     commands.add_parser("reboot")
     commands.add_parser("power-off")
@@ -550,6 +561,12 @@ def main():
         return say(command(f"launch {args.title_id}")[0])
     if args.command == "close-app":
         return say(command(f"close-app {args.app_id}" if args.app_id else "close-app")[0])
+    if args.command == "locate-title":
+        return say(command("locate-title")[0])
+    if args.command == "module":
+        return say(command(f"module {args.pid} {args.name}")[0])
+    if args.command == "dlsym":
+        return say(command(f"dlsym {args.pid} {args.name} {args.symbol}")[0])
     if args.command in ("rest", "reboot", "power-off"):
         what = {"rest": "rest", "reboot": "reboot", "power-off": "off"}[args.command]
         return say(command(f"power {what}")[0])

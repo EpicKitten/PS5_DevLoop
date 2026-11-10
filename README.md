@@ -105,6 +105,8 @@ disable that first.
 | `open-url URL` | open a URL in the console's web browser |
 | `launch TITLE_ID` | launch a registered title |
 | `close-app [APP_ID]` | close a running app (id from `ps`, else the foreground one) |
+| `locate-title` | the foreground app's ids right now (app id, pid, title id, command) |
+| `module PID NAME` / `dlsym PID NAME SYM` | where a module is mapped in a process, and a symbol's address in it |
 | `rest` / `reboot` / `power-off` | rest mode, reboot, or power off |
 | `uninstall TITLE_ID` | uninstall a title |
 | `notify TYPE MESSAGE` | an on-screen message: `toast` (banner) or `flyout` (card) |
