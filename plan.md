@@ -24,7 +24,7 @@ in this pass; **staged** = needs a resource or more work (noted per item).
 
 | Command | Function(s) | What it gives |
 | --- | --- | --- |
-| `notify "MSG"` | `sceKernelSendNotificationRequest` | a toast on the TV: a feedback channel for an unattended loop |
+| `notify TYPE "MSG"` | `sceKernelSendNotificationRequest` (toast), `sceNotificationSend` (flyout) | an on-screen message: a `toast` banner or a `flyout` card — a feedback channel for an unattended loop |
 | `hwinfo` | `sceKernelGetCpuTemperature`, `sceKernelGetSocSensorTemperature`, `sceKernelGetCpuFrequency`, `sceKernelGetHwModelName`, `sceKernelGetHwSerialNumber` | model, temps and clock: health during long runs |
 | `df` | `getmntinfo` / `statfs` | free space per mounted volume |
 | `kill PID` | `kill(pid, SIGKILL)` | end any process, not just registered apps |
@@ -41,10 +41,13 @@ is the real use. Verify it against a running title with a known address.
 
 ## Staged (need a resource or more work)
 
-- **`type "TEXT"`** — text entry. `sceImeDialog*` (libSceImeDialog) opens the
-  on-screen keyboard and returns a string, but injecting into an arbitrary
-  focused field from a payload is unreliable; `sceKeyboard*` HID is the other
-  route. Needs a focused app to test against. *Deferred: reliability.*
+- **Modal dialogs** — `sceMsgDialog` (OK / YesNo / progress), `sceErrorDialog`,
+  and `sceImeDialog` (on-screen keyboard, for `type "TEXT"`) all exist on the
+  console, but they are CommonDialog dialogs: they draw into *the calling
+  process's* framebuffer and must be pumped from its render loop. A background
+  payload has no video context, so these cannot be shown from here — only the
+  system-drawn notifications (`toast`, `flyout`) can. *Deferred: a dialog needs
+  to run inside a title's render loop (or an injected context).*
 - **`setting get/set KEY [VALUE]`** — system settings via `sceRegMgrGetInt/SetInt/
   GetStr/SetStr` (libSceRegMgr): resolution, HDR, language, rest timers. Reads
   are safe; writes need an allowlist of known-safe keys so a bad key can't

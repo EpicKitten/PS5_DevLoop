@@ -106,7 +106,7 @@ disable that first.
 | `close-app [APP_ID]` | close a running app (id from `ps`, else the foreground one) |
 | `rest` / `reboot` / `power-off` | rest mode, reboot, or power off |
 | `uninstall TITLE_ID` | uninstall a title |
-| `notify MESSAGE` | show a toast on the TV |
+| `notify TYPE MESSAGE` | an on-screen message: `toast` (banner) or `flyout` (card) |
 | `hwinfo` | model, serial, CPU/SoC temperatures, CPU clock |
 | `df` | free space per mounted volume |
 | `kill PID` | end a process (not just a registered app) |
@@ -121,6 +121,10 @@ byte-for-byte), `open-url`, `close-app`, `hwinfo`, `df`, `notify`, `peek`, and
   payload's own process is refused by the kernel's self-write rule — `poke`
   targets another process (a game), which is the point; verify it against a
   running title. `ps` gives the pids. `plan.md` tracks what is next.
+- **`notify toast`** draws the small banner, **`notify flyout`** the larger
+  card. Both are drawn by the system, so they work from the payload. Modal
+  dialogs (message, error, on-screen keyboard) are not here: they render into
+  the calling app's own framebuffer, which a background payload does not have.
 
 - **`launch`** uses `sceSystemServiceLaunchApp`, which takes titles registered in
   the shell's app database. Homebrew launched by a loader or a launcher (the

@@ -44,7 +44,7 @@
  *   close-app [APP_ID]        close a running app (default: the foreground one)
  *   uninstall TITLE_ID        uninstall a title
  *   power off|reboot|rest     power off, reboot, or enter rest mode
- *   notify MESSAGE            show a toast on the TV
+ *   notify TYPE MESSAGE       show a message: TYPE is toast or flyout
  *   hwinfo                    model, serial, temperatures, cpu clock
  *   df                        free space per mounted volume
  *   kill PID                  end a process
@@ -1307,10 +1307,14 @@ static void uninstall_app(int client, const char *title_id)
 // A static buffer whose address ping reports, so peek/poke can be verified.
 static char g_probe[32] = "DEVLOOP-MDBG-PROBE";
 
-// notify: a toast on the TV. The system notification request (a 45-byte header
-// then the message) shows the familiar banner; it is more reliable than the
-// JSON notification service, which accepts a request without always drawing it.
+// notify: an on-screen message. The system draws these, so they work from a
+// background payload (modal dialogs would need the caller's own video context).
+//  - toast:  the kernel notification request (a 45-byte header then the
+//            message) shows the familiar banner.
+//  - flyout: the notification service draws the richer interactive card, from a
+//            full JSON template (an incomplete one is accepted but not drawn).
 int sceKernelSendNotificationRequest(int device, void *request, size_t size, int blocking);
+int sceNotificationSend(int user_id, bool is_logged, const char *payload);
 
 typedef struct notify_request
 {
@@ -1318,15 +1322,63 @@ typedef struct notify_request
     char message[3075];
 } notify_request_t;
 
-static void notify(int client, const char *message)
+static void notify_toast(int client, const char *message)
 {
-    ensure_elevated();
     notify_request_t request;
     memset(&request, 0, sizeof(request));
     snprintf(request.message, sizeof(request.message), "%s", message);
-    const int32_t result =
-        sceKernelSendNotificationRequest(0, &request, sizeof(request), 0);
-    reply(client, "%s notify result=0x%08x", result == 0 ? "ok" : "err", (uint32_t)result);
+    const int32_t result = sceKernelSendNotificationRequest(0, &request, sizeof(request), 0);
+    reply(client, "%s notify toast result=0x%08x", result == 0 ? "ok" : "err", (uint32_t)result);
+}
+
+// Escape a string for embedding in a JSON double-quoted value.
+static void json_escape(char *out, size_t size, const char *in)
+{
+    size_t j = 0;
+    for (size_t i = 0; in[i] != '\0' && j + 2 < size; i++)
+    {
+        if (in[i] == '"' || in[i] == '\\')
+            out[j++] = '\\';
+        if ((unsigned char)in[i] >= 0x20)
+            out[j++] = in[i];
+    }
+    out[j] = '\0';
+}
+
+static void notify_flyout(int client, const char *message)
+{
+    char safe[320];
+    json_escape(safe, sizeof(safe), message);
+    char *const json = malloc(2048);
+    if (json == NULL)
+    {
+        reply(client, "err notify: out of memory");
+        return;
+    }
+    snprintf(json, 2048,
+             "{\"rawData\":{\"viewTemplateType\":\"InteractiveToastTemplateB\","
+             "\"channelType\":\"Downloads\",\"useCaseId\":\"IDC\",\"toastOverwriteType\":\"No\","
+             "\"isImmediate\":true,\"priority\":100,\"viewData\":{\"icon\":{\"type\":\"Predefined\","
+             "\"parameters\":{\"icon\":\"download\"}},\"message\":{\"body\":\"%s\"},"
+             "\"subMessage\":{\"body\":\"DevLoop\"}},\"platformViews\":{\"previewDisabled\":"
+             "{\"viewData\":{\"icon\":{\"type\":\"Predefined\",\"parameters\":{\"icon\":\"download\"}},"
+             "\"message\":{\"body\":\"%s\"}}}}},\"createdDateTime\":\"2025-01-01T00:00:00.000Z\","
+             "\"localNotificationId\":\"%u\"}",
+             safe, safe, (unsigned)(monotonic_us() & 0x7fffffffu));
+    const int32_t result = sceNotificationSend(0xFE, true, json);
+    free(json);
+    reply(client, "%s notify flyout result=0x%08x", result == 0 ? "ok" : "err", (uint32_t)result);
+}
+
+static void notify(int client, const char *type, const char *message)
+{
+    ensure_elevated();
+    if (type == NULL || strcmp(type, "toast") == 0)
+        notify_toast(client, message);
+    else if (strcmp(type, "flyout") == 0)
+        notify_flyout(client, message);
+    else
+        reply(client, "err usage: notify toast|flyout MESSAGE");
 }
 
 // hwinfo: model, serial, temperatures and cpu clock (the SDK's hwinfo sample).
@@ -1731,11 +1783,14 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     }
     if (strcmp(command, "notify") == 0)
     {
-        const char *const message = strtok(NULL, "");
-        if (message == NULL)
-            reply(client, "err usage: notify MESSAGE");
+        const char *const type = strtok(NULL, " \t");
+        const char *message = strtok(NULL, "");
+        while (message != NULL && (*message == ' ' || *message == '\t'))
+            message++;
+        if (message == NULL || *message == '\0')
+            reply(client, "err usage: notify toast|flyout MESSAGE");
         else
-            notify(client, message);
+            notify(client, type, message);
         return 0;
     }
     if (strcmp(command, "hwinfo") == 0)

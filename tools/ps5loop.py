@@ -39,7 +39,7 @@ Commands:
   close-app [APP_ID]    close a running app (app id from ps; else the big app)
   rest / reboot / power-off   put the console in rest mode, reboot, or power off
   uninstall TITLE_ID    uninstall a title (registered titles; irreversible)
-  notify MESSAGE        show a toast on the console
+  notify TYPE MESSAGE   show a message: TYPE is toast (banner) or flyout (card)
   hwinfo                model, serial, temperatures and cpu clock
   df                    free space per mounted volume
   kill PID              end a process by pid
@@ -398,7 +398,9 @@ def main():
     commands.add_parser("reboot")
     commands.add_parser("power-off")
     commands.add_parser("uninstall").add_argument("title_id")
-    commands.add_parser("notify").add_argument("message", nargs="+")
+    notifying = commands.add_parser("notify")
+    notifying.add_argument("type", choices=["toast", "flyout"])
+    notifying.add_argument("message", nargs="+")
     commands.add_parser("hwinfo")
     commands.add_parser("df")
     commands.add_parser("kill").add_argument("pid")
@@ -466,7 +468,7 @@ def main():
     if args.command == "uninstall":
         return say(command(f"uninstall {args.title_id}")[0])
     if args.command == "notify":
-        return say(command(f"notify {' '.join(args.message)}")[0])
+        return say(command(f"notify {args.type} {' '.join(args.message)}")[0])
     if args.command == "hwinfo":
         return say(command("hwinfo")[0])
     if args.command == "df":
