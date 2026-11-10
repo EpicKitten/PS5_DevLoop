@@ -124,11 +124,15 @@ disable that first.
 | `discover [--timeout S]` | find consoles on the LAN by UDP broadcast to the command port |
 | `http URL` | fetch an `http://` URL (saved under `downloads/`) |
 | `settings` | read the system registry (settings) as JSON |
+| `setting-set REGID VALUE` | write one integer setting by its regId (read back and verified) |
 
 Verified on firmware 12.20: `ps`, `ls`/`get`/`put`/`rm`/`mv` (a round trip is
 byte-for-byte), `hash` (matches `sha256sum` for a 1 MB file and an empty file),
-`open-url`, `close-app`, `hwinfo` (all 64 SoC sensors answer), `df`, `notify`,
-`peek`, `http`, and the console-hosted dashboard (`GET /`, `GET /api/hwinfo`).
+`open-url`, `close-app`, `locate-title`, `module`/`dlsym`, `hwinfo` (all 64 SoC
+sensors answer), `df`, `led`/`fan`/`beeper` (ICC ioctls return success),
+`scan`/`scan-aob` (hit a known probe), `kern-read`/`kern-write` and `setting-set`
+(verified), `notify`, `peek`, `http`, the UDP beacon and `klog-stream`, and the
+console-hosted dashboard (`GET /`, `GET /api/hwinfo`).
 Notes and limits:
 
 - **`peek`** reads a process's memory; **`poke`** writes it. Writing the

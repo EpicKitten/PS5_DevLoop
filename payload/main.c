@@ -65,6 +65,7 @@
  *   http http://URL           fetch a URL and send the response
  *   (a UDP probe to the command port is answered with an identifier: discovery)
  *   settings                  read the system registry as JSON
+ *   setting-set REGID VALUE   write one integer setting (read back and verified)
  *   quit                      remove the pad and leave the console
  *
  * The pad is the system's own virtual device (libScePad's
@@ -1424,7 +1425,25 @@ static void open_url(int client, const char *url)
 // quick; the keys are the regIds in hex.
 int sceRegMgrGetInt(uint32_t reg_id, int *value);
 int sceRegMgrGetStr(uint32_t reg_id, char *value, size_t size);
+int sceRegMgrSetInt(uint32_t reg_id, int value);
 static void json_escape(char *out, size_t size, const char *in);
+
+// setting-set: write one integer registry value by its regId and read it back.
+// The caller names the regId (as with poke, a wrong one can misconfigure the
+// console), so this is deliberately for a known key from a `settings` dump.
+static void setting_set(int client, uint32_t reg_id, int value)
+{
+    ensure_elevated();
+    const int rc = sceRegMgrSetInt(reg_id, value);
+    if (rc != 0)
+    {
+        reply(client, "err setting-set 0x%08x: result=0x%08x", reg_id, (uint32_t)rc);
+        return;
+    }
+    int check = 0;
+    const bool verified = sceRegMgrGetInt(reg_id, &check) == 0 && check == value;
+    reply(client, "ok setting-set 0x%08x=%d verify=%s", reg_id, value, verified ? "ok" : "mismatch");
+}
 
 static void settings_dump(int client)
 {
@@ -2608,6 +2627,16 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     if (strcmp(command, "hwinfo") == 0)
     {
         hwinfo(client);
+        return 0;
+    }
+    if (strcmp(command, "setting-set") == 0)
+    {
+        const char *const reg = strtok(NULL, " \t");
+        const char *const value = strtok(NULL, " \t");
+        if (reg == NULL || value == NULL)
+            reply(client, "err usage: setting-set REGID VALUE (REGID hex, from a settings dump)");
+        else
+            setting_set(client, (uint32_t)strtoul(reg, NULL, 0), atoi(value));
         return 0;
     }
     if (strcmp(command, "settings") == 0)

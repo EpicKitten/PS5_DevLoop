@@ -60,6 +60,7 @@ Commands:
   discover [--timeout S]  find consoles on this LAN by UDP broadcast
   http URL              fetch an http:// URL (saved under downloads/)
   settings [FILE]       read the system registry as JSON (saved under downloads/)
+  setting-set REGID V   write one integer setting by its regId (verified)
 
 The console's address comes from PS5_HOST in the environment, then from .env in
 this project (.env.example). It is never printed.
@@ -520,6 +521,9 @@ def main():
     commands.add_parser("http").add_argument("url", help="an http:// URL")
     commands.add_parser("settings").add_argument("file", nargs="?",
                                                 help="where to save the JSON (default downloads/)")
+    setset = commands.add_parser("setting-set")
+    setset.add_argument("regid", help="a regId in hex, from a settings dump")
+    setset.add_argument("value", type=int)
     args = parser.parse_args()
 
     if args.command == "load":
@@ -632,6 +636,8 @@ def main():
         return klog_stream(args.ms)
     if args.command == "discover":
         return discover(args.timeout)
+    if args.command == "setting-set":
+        return say(command(f"setting-set {args.regid} {args.value}")[0])
     if args.command == "settings":
         answer, data = command("settings", timeout=120, payload=True)
         if not answer.startswith("ok file"):
