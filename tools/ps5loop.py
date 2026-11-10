@@ -42,6 +42,7 @@ Commands:
   module PID NAME       where a module is mapped in a process (base, entry)
   modules PID           every loaded module in a process (handle, base, entry)
   dlsym PID NAME SYM    resolve a symbol's address in a process
+  call PID ADDR [ARGS]  call a function in a process (up to 6 int args) -> RAX
   install /PATH.pkg     install a .pkg already on the console
   exec /PATH [ARGS]     run a console binary and return its output
   wake                  wake from standby (UDP packet; needs PS5_WAKE_CREDENTIAL)
@@ -516,6 +517,10 @@ def main():
     dlsyming.add_argument("pid")
     dlsyming.add_argument("name", help="a module basename")
     dlsyming.add_argument("symbol")
+    calling = commands.add_parser("call")
+    calling.add_argument("pid")
+    calling.add_argument("addr", help="function address, hex (e.g. from dlsym)")
+    calling.add_argument("args", nargs="*", help="up to 6 integer args (hex or decimal)")
     commands.add_parser("install").add_argument("path", help="a console path to a .pkg")
     execing = commands.add_parser("exec")
     execing.add_argument("args", nargs=argparse.REMAINDER, help="/PATH [ARGS] to run on the console")
@@ -628,6 +633,8 @@ def main():
         return fetch_text(f"modules {args.pid}")
     if args.command == "dlsym":
         return say(command(f"dlsym {args.pid} {args.name} {args.symbol}")[0])
+    if args.command == "call":
+        return say(command(f"call {args.pid} {args.addr} " + " ".join(args.args), timeout=30)[0])
     if args.command == "install":
         return say(command(f"install {args.path}", timeout=120)[0])
     if args.command == "exec":

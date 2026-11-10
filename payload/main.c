@@ -48,6 +48,7 @@
  *   module PID BASENAME       where a module is mapped in a process
  *   modules PID               every loaded module in a process (handle/base/entry)
  *   dlsym PID BASENAME SYM    resolve a symbol's address in a process
+ *   call PID FUNC [ARGS]      call a function in a process (<=6 int args) -> RAX
  *   uninstall TITLE_ID        uninstall a title
  *   power off|reboot|rest     power off, reboot, or enter rest mode
  *   notify TYPE MESSAGE       show a message: TYPE is toast or flyout
@@ -128,6 +129,7 @@
 #include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/param.h>
+#include <sys/ptrace.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
@@ -136,6 +138,8 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+
+#include <machine/reg.h>
 
 #include <ps5/kernel.h>
 #include <ps5/mdbg.h>
@@ -1599,6 +1603,65 @@ static void dlsym_lookup(int client, pid_t pid, const char *basename, const char
         reply(client, "ok dlsym pid=%d %s %s=0x%lx", (int)pid, basename, symbol, (long)addr);
 }
 
+// call: run a function in a process with up to six integer args and return RAX.
+// ptrace thread-hijack: attach, save the registers, point RIP at the function
+// with args in the SysV registers and a return address that faults so the ret
+// traps back to us, continue, read RAX at the fault, restore, detach. ptrace is
+// often restricted on PS5, so attach may simply fail -- a clean error, no crash.
+static void call_in_process(int client, pid_t pid, intptr_t func, const uint64_t *args, int nargs)
+{
+    ensure_elevated();
+    if (ptrace(PT_ATTACH, pid, NULL, 0) != 0)
+    {
+        reply(client, "err call: attach pid=%d: %s (ptrace may be restricted here)", (int)pid,
+              strerror(errno));
+        return;
+    }
+    int status = 0;
+    waitpid(pid, &status, 0);
+    struct reg saved, regs;
+    if (ptrace(PT_GETREGS, pid, (caddr_t)&saved, 0) != 0)
+    {
+        const int err = errno;
+        ptrace(PT_DETACH, pid, NULL, 0);
+        reply(client, "err call: getregs pid=%d: %s", (int)pid, strerror(err));
+        return;
+    }
+    regs = saved;
+    regs.r_rdi = nargs > 0 ? (__int64_t)args[0] : 0;
+    regs.r_rsi = nargs > 1 ? (__int64_t)args[1] : 0;
+    regs.r_rdx = nargs > 2 ? (__int64_t)args[2] : 0;
+    regs.r_rcx = nargs > 3 ? (__int64_t)args[3] : 0;
+    regs.r_r8 = nargs > 4 ? (__int64_t)args[4] : 0;
+    regs.r_r9 = nargs > 5 ? (__int64_t)args[5] : 0;
+    // A return address that faults: when the function returns, RIP becomes this
+    // and the process stops with a signal we catch. Put it in scratch stack.
+    const uint64_t sentinel = 0x4141414141414141ull;
+    uint64_t sp = ((uint64_t)saved.r_rsp - 1024) & ~0xFull;
+    sp -= 8;
+    mdbg_copyin(pid, &sentinel, (intptr_t)sp, sizeof(sentinel));
+    regs.r_rsp = (__int64_t)sp;
+    regs.r_rip = (__int64_t)func;
+    if (ptrace(PT_SETREGS, pid, (caddr_t)&regs, 0) != 0)
+    {
+        const int err = errno;
+        ptrace(PT_SETREGS, pid, (caddr_t)&saved, 0);
+        ptrace(PT_DETACH, pid, NULL, 0);
+        reply(client, "err call: setregs pid=%d: %s", (int)pid, strerror(err));
+        return;
+    }
+    ptrace(PT_CONTINUE, pid, (caddr_t)1, 0);
+    waitpid(pid, &status, 0);
+    struct reg after;
+    uint64_t result = 0;
+    if (ptrace(PT_GETREGS, pid, (caddr_t)&after, 0) == 0)
+        result = (uint64_t)after.r_rax;
+    ptrace(PT_SETREGS, pid, (caddr_t)&saved, 0); // put the thread back
+    ptrace(PT_DETACH, pid, NULL, 0);
+    reply(client, "ok call pid=%d func=0x%lx rax=0x%llx", (int)pid, (long)func,
+          (unsigned long long)result);
+}
+
 // modules: every loaded module in a process. There is no enumeration call, so
 // walk the dynlib handle ids (they are small and sequential) and report the ones
 // with a mapping. Names need a kernel link-map walk, so this lists base/entry;
@@ -2815,6 +2878,23 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             reply(client, "err usage: dlsym PID BASENAME SYMBOL");
         else
             dlsym_lookup(client, (pid_t)atoi(pid), name, symbol);
+        return 0;
+    }
+    if (strcmp(command, "call") == 0)
+    {
+        const char *const pid = strtok(NULL, " \t");
+        const char *const addr = strtok(NULL, " \t");
+        if (pid == NULL || addr == NULL)
+            reply(client, "err usage: call PID FUNC_ADDR [ARG0..ARG5]");
+        else
+        {
+            uint64_t args[6] = {0};
+            int nargs = 0;
+            for (const char *tok = strtok(NULL, " \t"); tok != NULL && nargs < 6;
+                 tok = strtok(NULL, " \t"))
+                args[nargs++] = strtoull(tok, NULL, 0);
+            call_in_process(client, (pid_t)atoi(pid), (intptr_t)strtoull(addr, NULL, 0), args, nargs);
+        }
         return 0;
     }
     if (strcmp(command, "power") == 0)
