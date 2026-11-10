@@ -44,6 +44,14 @@
  *   close-app [APP_ID]        close a running app (default: the foreground one)
  *   uninstall TITLE_ID        uninstall a title
  *   power off|reboot|rest     power off, reboot, or enter rest mode
+ *   notify TYPE MESSAGE       show a message: TYPE is toast or flyout
+ *   hwinfo                    model, serial, temperatures, cpu clock
+ *   df                        free space per mounted volume
+ *   kill PID                  end a process
+ *   peek PID ADDR LEN         read a process's memory
+ *   poke PID ADDR HEX         write a process's memory
+ *   http http://URL           fetch a URL and send the response
+ *   settings                  read the system registry as JSON
  *   quit                      remove the pad and leave the console
  *
  * The pad is the system's own virtual device (libScePad's
@@ -88,6 +96,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <netdb.h>
 #include <netinet/in.h>
 #include <poll.h>
 #include <pthread.h>
@@ -98,6 +107,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/mount.h>
+#include <sys/param.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/sysctl.h>
@@ -107,6 +118,7 @@
 #include <unistd.h>
 
 #include <ps5/kernel.h>
+#include <ps5/mdbg.h>
 
 #define PS5LOOP_PORT 9112
 #define PS5LOOP_LINE 1024
@@ -1231,6 +1243,61 @@ static void open_url(int client, const char *url)
     reply(client, "%s open-url result=0x%08x %s", result == 0 ? "ok" : "err", (uint32_t)result, url);
 }
 
+// settings: read the system registry as JSON. There is no privileged "dump all"
+// call (the tool-enumeration interface answers 0x800d0218), but every value is
+// readable by its regId, which is (category << 24) | (sub << 16) | entry. Scan
+// that space: an int with sceRegMgrGetInt, else a string with sceRegMgrGetStr.
+// A (cat, sub) whose first entries are all empty is skipped, so the scan is
+// quick; the keys are the regIds in hex.
+int sceRegMgrGetInt(uint32_t reg_id, int *value);
+int sceRegMgrGetStr(uint32_t reg_id, char *value, size_t size);
+static void json_escape(char *out, size_t size, const char *in);
+
+static void settings_dump(int client)
+{
+    ensure_elevated();
+    size_t cap = 1u << 16, used = 0;
+    char *json = malloc(cap);
+    json = text_append(json, &cap, &used, "{");
+    bool first = true;
+    for (uint32_t cat = 0; cat <= 0xFF && json != NULL; cat++)
+        for (uint32_t sub = 0; sub <= 0xFF && json != NULL; sub++)
+        {
+            bool any = false;
+            for (uint32_t entry = 0; entry < 0x20 && json != NULL; entry++)
+            {
+                const uint32_t reg_id = (cat << 24) | (sub << 16) | entry;
+                int value = 0;
+                char text[400];
+                if (sceRegMgrGetInt(reg_id, &value) == 0)
+                {
+                    json = text_append(json, &cap, &used, "%s\n  \"0x%08x\": %d",
+                                       first ? "" : ",", reg_id, value);
+                    any = true;
+                    first = false;
+                }
+                else if (sceRegMgrGetStr(reg_id, text, sizeof(text)) == 0 && text[0] != '\0')
+                {
+                    char safe[820];
+                    json_escape(safe, sizeof(safe), text);
+                    json = text_append(json, &cap, &used, "%s\n  \"0x%08x\": \"%s\"",
+                                       first ? "" : ",", reg_id, safe);
+                    any = true;
+                    first = false;
+                }
+                else if (!any && entry >= 3)
+                    break; /* this (cat, sub) namespace looks empty */
+            }
+        }
+    if (json != NULL)
+        json = text_append(json, &cap, &used, "\n}\n");
+    if (json == NULL)
+        reply(client, "err settings: out of memory");
+    else
+        send_bytes(client, "settings", json, used);
+    free(json);
+}
+
 // Apps: launch a title by id, close a running app by its app id (from ps).
 int sceSystemServiceLaunchApp(const char *title_id, const char *argv[], void *param);
 int sceLncUtilKillApp(uint32_t app_id);
@@ -1293,6 +1360,269 @@ static void uninstall_app(int client, const char *title_id)
           (uint32_t)result);
 }
 
+// A static buffer whose address ping reports, so peek/poke can be verified.
+static char g_probe[32] = "DEVLOOP-MDBG-PROBE";
+
+// notify: an on-screen message. The system draws these, so they work from a
+// background payload (modal dialogs would need the caller's own video context).
+//  - toast:  the kernel notification request (a 45-byte header then the
+//            message) shows the familiar banner.
+//  - flyout: the notification service draws the richer interactive card, from a
+//            full JSON template (an incomplete one is accepted but not drawn).
+int sceKernelSendNotificationRequest(int device, void *request, size_t size, int blocking);
+int sceNotificationSend(int user_id, bool is_logged, const char *payload);
+
+typedef struct notify_request
+{
+    char header[45];
+    char message[3075];
+} notify_request_t;
+
+static void notify_toast(int client, const char *message)
+{
+    notify_request_t request;
+    memset(&request, 0, sizeof(request));
+    snprintf(request.message, sizeof(request.message), "%s", message);
+    const int32_t result = sceKernelSendNotificationRequest(0, &request, sizeof(request), 0);
+    reply(client, "%s notify toast result=0x%08x", result == 0 ? "ok" : "err", (uint32_t)result);
+}
+
+// Escape a string for embedding in a JSON double-quoted value.
+static void json_escape(char *out, size_t size, const char *in)
+{
+    size_t j = 0;
+    for (size_t i = 0; in[i] != '\0' && j + 2 < size; i++)
+    {
+        if (in[i] == '"' || in[i] == '\\')
+            out[j++] = '\\';
+        if ((unsigned char)in[i] >= 0x20)
+            out[j++] = in[i];
+    }
+    out[j] = '\0';
+}
+
+static void notify_flyout(int client, const char *message)
+{
+    char safe[320];
+    json_escape(safe, sizeof(safe), message);
+    char *const json = malloc(2048);
+    if (json == NULL)
+    {
+        reply(client, "err notify: out of memory");
+        return;
+    }
+    snprintf(json, 2048,
+             "{\"rawData\":{\"viewTemplateType\":\"InteractiveToastTemplateB\","
+             "\"channelType\":\"Downloads\",\"useCaseId\":\"IDC\",\"toastOverwriteType\":\"No\","
+             "\"isImmediate\":true,\"priority\":100,\"viewData\":{\"icon\":{\"type\":\"Predefined\","
+             "\"parameters\":{\"icon\":\"download\"}},\"message\":{\"body\":\"%s\"},"
+             "\"subMessage\":{\"body\":\"DevLoop\"}},\"platformViews\":{\"previewDisabled\":"
+             "{\"viewData\":{\"icon\":{\"type\":\"Predefined\",\"parameters\":{\"icon\":\"download\"}},"
+             "\"message\":{\"body\":\"%s\"}}}}},\"createdDateTime\":\"2025-01-01T00:00:00.000Z\","
+             "\"localNotificationId\":\"%u\"}",
+             safe, safe, (unsigned)(monotonic_us() & 0x7fffffffu));
+    const int32_t result = sceNotificationSend(0xFE, true, json);
+    free(json);
+    reply(client, "%s notify flyout result=0x%08x", result == 0 ? "ok" : "err", (uint32_t)result);
+}
+
+static void notify(int client, const char *type, const char *message)
+{
+    ensure_elevated();
+    if (type == NULL || strcmp(type, "toast") == 0)
+        notify_toast(client, message);
+    else if (strcmp(type, "flyout") == 0)
+        notify_flyout(client, message);
+    else
+        reply(client, "err usage: notify toast|flyout MESSAGE");
+}
+
+// hwinfo: model, serial, temperatures and cpu clock (the SDK's hwinfo sample).
+int sceKernelGetHwModelName(char *);
+int sceKernelGetHwSerialNumber(char *);
+long sceKernelGetCpuFrequency(void);
+int sceKernelGetCpuTemperature(int *);
+int sceKernelGetSocSensorTemperature(int, int *);
+
+static void hwinfo(int client)
+{
+    char model[256] = "?", serial[256] = "?";
+    int cpu_temp = 0, soc_temp = 0;
+    (void)sceKernelGetHwModelName(model);
+    (void)sceKernelGetHwSerialNumber(serial);
+    (void)sceKernelGetCpuTemperature(&cpu_temp);
+    (void)sceKernelGetSocSensorTemperature(0, &soc_temp);
+    reply(client, "ok fw=0x%08x model=%s serial=%s cpuC=%d socC=%d cpuMHz=%ld",
+          kernel_get_fw_version(), model, serial, cpu_temp, soc_temp,
+          sceKernelGetCpuFrequency() / 1000000);
+}
+
+// df: free space per mounted volume.
+static void df(int client)
+{
+    struct statfs *mounts = NULL;
+    const int count = getmntinfo(&mounts, MNT_NOWAIT);
+    size_t cap = 1u << 14, used = 0;
+    char *text = malloc(cap);
+    text = text_append(text, &cap, &used, "%-26s %10s %10s  %s\n", "MOUNT", "SIZE_MB", "FREE_MB",
+                       "FROM");
+    for (int i = 0; text != NULL && i < count; i++)
+    {
+        const long long bs = mounts[i].f_bsize;
+        text = text_append(text, &cap, &used, "%-26s %10lld %10lld  %s\n", mounts[i].f_mntonname,
+                           (long long)mounts[i].f_blocks * bs / (1024 * 1024),
+                           (long long)mounts[i].f_bfree * bs / (1024 * 1024),
+                           mounts[i].f_mntfromname);
+    }
+    if (text == NULL)
+        reply(client, "err df: out of memory");
+    else
+        send_bytes(client, "df", text, used);
+    free(text);
+}
+
+// kill: end any process by pid (close-app is for registered apps).
+static void kill_pid(int client, int pid)
+{
+    if (kill(pid, SIGKILL) == 0)
+        reply(client, "ok kill %d", pid);
+    else
+        reply(client, "err kill %d: %s", pid, strerror(errno));
+}
+
+// peek: read a process's memory through the debugger.
+static void peek(int client, pid_t pid, intptr_t addr, size_t len)
+{
+    if (len == 0 || len > (1u << 20))
+    {
+        reply(client, "err peek: length 1..1048576");
+        return;
+    }
+    char *const buffer = malloc(len);
+    if (buffer == NULL)
+    {
+        reply(client, "err peek: out of memory");
+        return;
+    }
+    if (mdbg_copyout(pid, addr, buffer, len) != 0)
+        reply(client, "err peek pid=%d addr=0x%lx: %s", (int)pid, (long)addr, strerror(errno));
+    else
+        send_bytes(client, "peek", buffer, len);
+    free(buffer);
+}
+
+// poke: write a hex string into a process's memory.
+static void poke(int client, pid_t pid, intptr_t addr, const char *hex)
+{
+    const size_t hexlen = strlen(hex);
+    const size_t len = hexlen / 2;
+    if (len == 0 || hexlen % 2 != 0 || len > (1u << 20))
+    {
+        reply(client, "err poke: give an even-length hex string");
+        return;
+    }
+    char *const buffer = malloc(len);
+    if (buffer == NULL)
+    {
+        reply(client, "err poke: out of memory");
+        return;
+    }
+    for (size_t i = 0; i < len; i++)
+    {
+        const char byte[3] = {hex[i * 2], hex[i * 2 + 1], '\0'};
+        buffer[i] = (char)strtoul(byte, NULL, 16);
+    }
+    const int result = mdbg_copyin(pid, buffer, addr, len);
+    free(buffer);
+    if (result != 0)
+        reply(client, "err poke pid=%d addr=0x%lx: %s", (int)pid, (long)addr, strerror(errno));
+    else
+        reply(client, "ok poke %zu bytes pid=%d addr=0x%lx", len, (int)pid, (long)addr);
+}
+
+// http: a plain HTTP/1.1 GET over a raw socket, for http:// URLs.
+static void http_get(int client, const char *url)
+{
+    if (strncmp(url, "http://", 7) != 0)
+    {
+        reply(client, "err http: only http:// URLs (https needs TLS)");
+        return;
+    }
+    char host[256];
+    const char *const after = url + 7;
+    const char *const slash = strchr(after, '/');
+    const char *const path = slash != NULL ? slash : "/";
+    size_t hostlen = slash != NULL ? (size_t)(slash - after) : strlen(after);
+    if (hostlen >= sizeof(host))
+        hostlen = sizeof(host) - 1;
+    memcpy(host, after, hostlen);
+    host[hostlen] = '\0';
+    int port = 80;
+    char *const colon = strchr(host, ':');
+    if (colon != NULL)
+    {
+        *colon = '\0';
+        port = atoi(colon + 1);
+    }
+    char port_text[8];
+    snprintf(port_text, sizeof(port_text), "%d", port);
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo *info = NULL;
+    if (getaddrinfo(host, port_text, &hints, &info) != 0 || info == NULL)
+    {
+        reply(client, "err http: cannot resolve %s", host);
+        return;
+    }
+    const int sock = socket(info->ai_family, info->ai_socktype, 0);
+    if (sock < 0 || connect(sock, info->ai_addr, info->ai_addrlen) != 0)
+    {
+        if (sock >= 0)
+            close(sock);
+        freeaddrinfo(info);
+        reply(client, "err http: cannot connect to %s:%d", host, port);
+        return;
+    }
+    freeaddrinfo(info);
+    char request[1024];
+    const int reqlen = snprintf(request, sizeof(request),
+                                "GET %s HTTP/1.1\r\nHost: %s\r\nUser-Agent: ps5loop\r\n"
+                                "Connection: close\r\n\r\n",
+                                path, host);
+    (void)send(sock, request, (size_t)reqlen, 0);
+    size_t cap = 1u << 16, used = 0;
+    char *body = malloc(cap);
+    while (body != NULL)
+    {
+        if (cap - used < 4096)
+        {
+            char *const bigger = realloc(body, cap * 2);
+            if (bigger == NULL)
+            {
+                free(body);
+                body = NULL;
+                break;
+            }
+            body = bigger;
+            cap *= 2;
+        }
+        const ssize_t got = recv(sock, body + used, cap - used, 0);
+        if (got <= 0)
+            break;
+        used += (size_t)got;
+        if (used > (8u << 20))
+            break;
+    }
+    close(sock);
+    if (body == NULL)
+        reply(client, "err http: out of memory");
+    else
+        send_bytes(client, url, body, used);
+    free(body);
+}
+
 // Answer one command. Returns 0 to keep serving, -1 to leave the console.
 static int handle_command(int client, char *line, const char *body, size_t body_len)
 {
@@ -1305,8 +1635,9 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     }
     if (strcmp(command, "ping") == 0)
     {
-        reply(client, "ok ps5loop 1 pid=%d fw=0x%08x pad=%s", (int)getpid(),
-              kernel_get_fw_version(), g_pad.open ? "open" : "closed");
+        reply(client, "ok ps5loop 1 pid=%d fw=0x%08x pad=%s probe=0x%llx", (int)getpid(),
+              kernel_get_fw_version(), g_pad.open ? "open" : "closed",
+              (unsigned long long)(uintptr_t)g_probe);
         return 0;
     }
     if (strcmp(command, "quit") == 0)
@@ -1504,6 +1835,74 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             reply(client, "err usage: uninstall TITLE_ID");
         else
             uninstall_app(client, title_id);
+        return 0;
+    }
+    if (strcmp(command, "notify") == 0)
+    {
+        const char *const type = strtok(NULL, " \t");
+        const char *message = strtok(NULL, "");
+        while (message != NULL && (*message == ' ' || *message == '\t'))
+            message++;
+        if (message == NULL || *message == '\0')
+            reply(client, "err usage: notify toast|flyout MESSAGE");
+        else
+            notify(client, type, message);
+        return 0;
+    }
+    if (strcmp(command, "hwinfo") == 0)
+    {
+        hwinfo(client);
+        return 0;
+    }
+    if (strcmp(command, "settings") == 0)
+    {
+        settings_dump(client);
+        return 0;
+    }
+    if (strcmp(command, "df") == 0)
+    {
+        df(client);
+        return 0;
+    }
+    if (strcmp(command, "kill") == 0)
+    {
+        const char *const pid = strtok(NULL, " \t");
+        if (pid == NULL)
+            reply(client, "err usage: kill PID");
+        else
+            kill_pid(client, atoi(pid));
+        return 0;
+    }
+    if (strcmp(command, "peek") == 0)
+    {
+        const char *const pid = strtok(NULL, " \t");
+        const char *const addr = strtok(NULL, " \t");
+        const char *const len = strtok(NULL, " \t");
+        if (pid == NULL || addr == NULL || len == NULL)
+            reply(client, "err usage: peek PID ADDR LEN");
+        else
+            peek(client, (pid_t)atoi(pid), (intptr_t)strtoull(addr, NULL, 0),
+                 (size_t)strtoull(len, NULL, 0));
+        return 0;
+    }
+    if (strcmp(command, "poke") == 0)
+    {
+        const char *const pid = strtok(NULL, " \t");
+        const char *const addr = strtok(NULL, " \t");
+        const char *const hex = strtok(NULL, " \t");
+        if (pid == NULL || addr == NULL || hex == NULL)
+            reply(client, "err usage: poke PID ADDR HEX");
+        else
+            poke(client, (pid_t)atoi(pid), (intptr_t)strtoull(addr, NULL, 0), hex);
+        return 0;
+    }
+    if (strcmp(command, "http") == 0)
+    {
+        const char *const url = strtok(NULL, " \t");
+        if (url == NULL)
+            reply(client, "err usage: http http://URL");
+        else
+            http_get(client, url);
         return 0;
     }
     if (strcmp(command, "pad") != 0)

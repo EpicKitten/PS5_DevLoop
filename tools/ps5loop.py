@@ -39,6 +39,14 @@ Commands:
   close-app [APP_ID]    close a running app (app id from ps; else the big app)
   rest / reboot / power-off   put the console in rest mode, reboot, or power off
   uninstall TITLE_ID    uninstall a title (registered titles; irreversible)
+  notify TYPE MESSAGE   show a message: TYPE is toast (banner) or flyout (card)
+  hwinfo                model, serial, temperatures and cpu clock
+  df                    free space per mounted volume
+  kill PID              end a process by pid
+  peek PID ADDR LEN     read a process's memory (prints hex + ascii)
+  poke PID ADDR HEX     write a hex string into a process's memory
+  http URL              fetch an http:// URL (saved under downloads/)
+  settings [FILE]       read the system registry as JSON (saved under downloads/)
 
 The console's address comes from PS5_HOST in the environment, then from .env in
 this project (.env.example). It is never printed.
@@ -391,6 +399,23 @@ def main():
     commands.add_parser("reboot")
     commands.add_parser("power-off")
     commands.add_parser("uninstall").add_argument("title_id")
+    notifying = commands.add_parser("notify")
+    notifying.add_argument("type", choices=["toast", "flyout"])
+    notifying.add_argument("message", nargs="+")
+    commands.add_parser("hwinfo")
+    commands.add_parser("df")
+    commands.add_parser("kill").add_argument("pid")
+    peeking = commands.add_parser("peek")
+    peeking.add_argument("pid")
+    peeking.add_argument("addr", help="hex (0x...) or decimal")
+    peeking.add_argument("len")
+    poking = commands.add_parser("poke")
+    poking.add_argument("pid")
+    poking.add_argument("addr")
+    poking.add_argument("hex", help="bytes as a hex string, e.g. deadbeef")
+    commands.add_parser("http").add_argument("url", help="an http:// URL")
+    commands.add_parser("settings").add_argument("file", nargs="?",
+                                                help="where to save the JSON (default downloads/)")
     args = parser.parse_args()
 
     if args.command == "load":
@@ -445,6 +470,43 @@ def main():
         return say(command(f"power {what}")[0])
     if args.command == "uninstall":
         return say(command(f"uninstall {args.title_id}")[0])
+    if args.command == "notify":
+        return say(command(f"notify {args.type} {' '.join(args.message)}")[0])
+    if args.command == "hwinfo":
+        return say(command("hwinfo")[0])
+    if args.command == "df":
+        return fetch_text("df")
+    if args.command == "kill":
+        return say(command(f"kill {args.pid}")[0])
+    if args.command == "peek":
+        answer, data = command(f"peek {args.pid} {args.addr} {args.len}", payload=True)
+        if not answer.startswith("ok file"):
+            return say(answer)
+        print(data.hex())
+        print("ascii:", "".join(chr(b) if 32 <= b < 127 else "." for b in data))
+        return 0
+    if args.command == "poke":
+        return say(command(f"poke {args.pid} {args.addr} {args.hex}")[0])
+    if args.command == "settings":
+        answer, data = command("settings", timeout=120, payload=True)
+        if not answer.startswith("ok file"):
+            return say(answer)
+        out = Path(args.file) if args.file else ROOT / "downloads" / time.strftime(
+            "settings-%Y%m%d-%H%M%S.json")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        print(f"ok settings {len(data)} bytes -> {out}")
+        return 0
+    if args.command == "http":
+        answer, data = command(f"http {args.url}", timeout=60, payload=True)
+        if not answer.startswith("ok file"):
+            return say(answer)
+        out = ROOT / "downloads" / time.strftime("http-%Y%m%d-%H%M%S.txt")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        first = data.split(b"\r\n", 1)[0].decode("utf-8", "replace")
+        print(f"ok http {len(data)} bytes ({first}) -> {out}")
+        return 0
     if args.command == "press":
         return say(command(f"pad tap {mask(args.buttons):x} {args.ms}")[0])
     if args.command == "hold":

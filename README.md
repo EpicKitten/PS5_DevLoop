@@ -106,9 +106,31 @@ disable that first.
 | `close-app [APP_ID]` | close a running app (id from `ps`, else the foreground one) |
 | `rest` / `reboot` / `power-off` | rest mode, reboot, or power off |
 | `uninstall TITLE_ID` | uninstall a title |
+| `notify TYPE MESSAGE` | an on-screen message: `toast` (banner) or `flyout` (card) |
+| `hwinfo` | model, serial, CPU/SoC temperatures, CPU clock |
+| `df` | free space per mounted volume |
+| `kill PID` | end a process (not just a registered app) |
+| `peek PID ADDR LEN` / `poke PID ADDR HEX` | read / write a process's memory |
+| `http URL` | fetch an `http://` URL (saved under `downloads/`) |
+| `settings` | read the system registry (settings) as JSON |
 
 Verified on firmware 12.20: `ps`, `ls`/`get`/`put`/`rm`/`mv` (a round trip is
-byte-for-byte), `open-url`, and `close-app`. Notes and limits:
+byte-for-byte), `open-url`, `close-app`, `hwinfo`, `df`, `notify`, `peek`, and
+`http`. Notes and limits:
+
+- **`peek`** reads a process's memory; **`poke`** writes it. Writing the
+  payload's own process is refused by the kernel's self-write rule — `poke`
+  targets another process (a game), which is the point; verify it against a
+  running title. `ps` gives the pids. `plan.md` tracks what is next.
+- **`notify toast`** draws the small banner, **`notify flyout`** the larger
+  card. Both are drawn by the system, so they work from the payload. Modal
+  dialogs (message, error, on-screen keyboard) are not here: they render into
+  the calling app's own framebuffer, which a background payload does not have.
+- **`settings`** reads the registry by scanning regIds (`(cat << 24) | (sub <<
+  16) | entry`) with `sceRegMgrGetInt`/`GetStr`, keyed by regId in hex. It
+  covers the readable int and string values across every category; binary
+  entries and writing values are not included (a write needs a safe-key
+  allowlist — see `plan.md`).
 
 - **`launch`** uses `sceSystemServiceLaunchApp`, which takes titles registered in
   the shell's app database. Homebrew launched by a loader or a launcher (the
@@ -122,6 +144,21 @@ byte-for-byte), `open-url`, and `close-app`. Notes and limits:
   the app installer's full register-and-poll flow and a `.pkg` to build against;
   wake is a host-side Remote Play packet that needs the console's pairing
   credentials.
+
+## Live dashboard
+
+`tools/ps5web.py` is a companion web dashboard that shows the console's hardware
+info live: the model, CPU and SoC temperatures (as gauges and a rolling chart),
+and the CPU clock.
+
+```bash
+tools/ps5web.py            # serves http://127.0.0.1:8099, then open it
+```
+
+A browser cannot reach the console's raw port, so the script is the bridge: it
+serves the page and a `/api/hwinfo` endpoint that polls the payload. It uses the
+same `PS5_HOST`/`.env` as `ps5loop.py`, and never sends the console's address to
+the browser.
 
 ## How it works
 

@@ -1,5 +1,7 @@
 build/
 captures/
+downloads/
 .env
 __pycache__/
 .DS_Store
+.claude/
