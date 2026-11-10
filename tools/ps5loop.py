@@ -46,6 +46,9 @@ Commands:
   notify TYPE MESSAGE   show a message: TYPE is toast (banner) or flyout (card)
   hwinfo                model, serial, temperatures and cpu clock
   df                    free space per mounted volume
+  led BLUE WHITE AMBER  set the indicator LED (levels 0..255, -1 leaves), or: led off
+  fan [TEMP]            read the fan duty, or set the threshold (30..90 C)
+  beeper [PATTERN]      beep the console (pattern 0..3, default 1)
   kill PID              end a process by pid
   peek PID ADDR LEN     read a process's memory (prints hex + ascii)
   poke PID ADDR HEX     write a hex string into a process's memory (verified)
@@ -478,6 +481,13 @@ def main():
     notifying.add_argument("message", nargs="+")
     commands.add_parser("hwinfo")
     commands.add_parser("df")
+    leds = commands.add_parser("led")
+    leds.add_argument("blue", help="0..255, -1 to leave, or the word 'off'")
+    leds.add_argument("white", nargs="?")
+    leds.add_argument("amber", nargs="?")
+    fanning = commands.add_parser("fan")
+    fanning.add_argument("temp", nargs="?", help="omit to read; a number to set the threshold (30..90)")
+    commands.add_parser("beeper").add_argument("pattern", nargs="?", help="0..3 (default 1)")
     commands.add_parser("kill").add_argument("pid")
     peeking = commands.add_parser("peek")
     peeking.add_argument("pid")
@@ -578,6 +588,16 @@ def main():
         return say(command("hwinfo")[0])
     if args.command == "df":
         return fetch_text("df")
+    if args.command == "led":
+        if args.blue == "off":
+            return say(command("led off")[0])
+        if args.white is None or args.amber is None:
+            return say("usage: led BLUE WHITE AMBER (each 0..255 or -1), or led off")
+        return say(command(f"led {args.blue} {args.white} {args.amber}")[0])
+    if args.command == "fan":
+        return say(command(f"fan set {args.temp}" if args.temp else "fan")[0])
+    if args.command == "beeper":
+        return say(command(f"beeper {args.pattern}" if args.pattern else "beeper")[0])
     if args.command == "kill":
         return say(command(f"kill {args.pid}")[0])
     if args.command == "peek":

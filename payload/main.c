@@ -50,6 +50,9 @@
  *   notify TYPE MESSAGE       show a message: TYPE is toast or flyout
  *   hwinfo                    model, serial, cpu + all SoC temperatures, cpu clock
  *   df                        free space per mounted volume
+ *   led BLUE WHITE AMBER|off  set the console indicator LED (levels 0..255)
+ *   fan [set TEMP]            read the fan duty, or set the threshold (30..90 C)
+ *   beeper [PATTERN]          beep the console (pattern 0..3)
  *   GET / , GET /api/hwinfo   a browser gets the live dashboard, hosted here
  *   kill PID                  end a process
  *   peek PID ADDR LEN         read a process's memory
@@ -117,6 +120,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <sys/mount.h>
 #include <sys/param.h>
 #include <sys/socket.h>
@@ -1770,6 +1774,148 @@ static char *hwinfo_json(void)
     return text_append(json, &cap, &used, "]}");
 }
 
+// ===== Console hardware: indicator LED, fan and beeper (ICC) =====
+// The indicator LED goes through /dev/icc_indicator's dynamic-LED ioctls -- a
+// direct device path, so it needs no scePad handle (which SceShellUI owns, the
+// blocker for lightbar output). State is a 130-byte blob: a 4-byte header
+// (count at [2..3]) then 42-byte per-channel blocks { id; step_count; steps }.
+// A held colour is one 5-byte step. Channels: 0x01 blue, 0x11 white, 0x21 amber.
+// Protocol from PS5-Suite / ps5-beeper-LED live-hardware research.
+#define ICC_INDICATOR_DEV "/dev/icc_indicator"
+#define ICC_LED_STATE_SIZE 130
+#define ICC_LED_GET 0x40829505ul
+#define ICC_LED_SET 0x80829504ul
+#define ICC_BLOCK_START 4
+#define ICC_BLOCK_SIZE 42
+
+static int icc_led_block(const uint8_t *st, uint8_t id)
+{
+    const int count = st[2] | (st[3] << 8);
+    for (int i = 0; i < count && ICC_BLOCK_START + (i + 1) * ICC_BLOCK_SIZE <= ICC_LED_STATE_SIZE; i++)
+    {
+        const int at = ICC_BLOCK_START + i * ICC_BLOCK_SIZE;
+        if (st[at] == id)
+            return at;
+    }
+    return -1;
+}
+
+// Hold the given levels (0-255) on the three channels; -1 leaves one unchanged.
+// Each touched channel is rewritten as one step, the encoding the ICC accepts.
+static int icc_led_set(int blue, int white, int amber)
+{
+    const int fd = open(ICC_INDICATOR_DEV, O_RDWR);
+    if (fd < 0)
+        return -errno;
+    uint8_t st[ICC_LED_STATE_SIZE];
+    if (ioctl(fd, ICC_LED_GET, st) != 0)
+    {
+        const int err = errno;
+        close(fd);
+        return -err;
+    }
+    const uint8_t ids[3] = {0x01, 0x11, 0x21};
+    const int lv[3] = {blue, white, amber};
+    int patched = 0;
+    for (int i = 0; i < 3; i++)
+    {
+        if (lv[i] < 0)
+            continue;
+        const int at = icc_led_block(st, ids[i]);
+        if (at < 0)
+            continue;
+        memset(st + at, 0, ICC_BLOCK_SIZE);
+        const uint8_t prog[7] = {ids[i], 1, 0x02, (uint8_t)lv[i], 0x05, 0x02, 0x00};
+        memcpy(st + at, prog, sizeof(prog));
+        patched = 1;
+    }
+    int rc = 0;
+    if (!patched)
+        rc = -ENODEV;
+    else if (ioctl(fd, ICC_LED_SET, st) != 0)
+        rc = -errno;
+    close(fd);
+    return rc;
+}
+
+static void led_command(int client, int blue, int white, int amber)
+{
+    ensure_elevated();
+    const int rc = icc_led_set(blue, white, amber);
+    if (rc == 0)
+        reply(client, "ok led blue=%d white=%d amber=%d", blue, white, amber);
+    else
+        reply(client, "err led: %s", strerror(-rc));
+}
+
+// Fan: /dev/icc_fan. One ioctl sets the manual temperature threshold (30-90 C,
+// the layout etaHEN uses: temp at byte 5); another reads the manual duty, which
+// reports fan speed rather than the threshold. Changing the threshold changes
+// cooling, so it is clamped and only set when asked.
+#define ICC_FAN_DEV "/dev/icc_fan"
+#define ICC_FAN_SET_THRESHOLD 0xC01C8F07ul
+#define ICC_FAN_GET_DUTY 0xC0068F06ul
+
+static void fan_command(int client, const char *temp_text)
+{
+    ensure_elevated();
+    const int fd = open(ICC_FAN_DEV, O_RDONLY);
+    if (fd < 0)
+    {
+        reply(client, "err fan: %s", strerror(errno));
+        return;
+    }
+    if (temp_text != NULL)
+    {
+        int temp = atoi(temp_text);
+        if (temp < 30)
+            temp = 30;
+        if (temp > 90)
+            temp = 90;
+        unsigned char data[10] = {0, 0, 0, 0, 0, (unsigned char)temp, 0, 0, 0, 0};
+        const int rc = ioctl(fd, ICC_FAN_SET_THRESHOLD, data);
+        const int err = errno;
+        close(fd);
+        if (rc == 0)
+            reply(client, "ok fan threshold=%dC", temp);
+        else
+            reply(client, "err fan set: %s", strerror(err));
+        return;
+    }
+    unsigned char duty[6] = {0};
+    const int rc = ioctl(fd, ICC_FAN_GET_DUTY, duty);
+    const int err = errno;
+    close(fd);
+    if (rc != 0)
+        reply(client, "err fan duty: %s", strerror(err));
+    else
+        reply(client, "ok fan duty=%u,%u,%u,%u,%u,%u", duty[0], duty[1], duty[2], duty[3], duty[4],
+              duty[5]);
+}
+
+// Beeper: sceKernelIccSetBuzzer(pattern). Not a stub in this SDK, so resolve it
+// from a loaded libkernel at run time (PS5-Suite resolves it the same way).
+static void beeper_command(int client, int pattern)
+{
+    ensure_elevated();
+    int (*set_buzzer)(int) = NULL;
+    const char *const libs[] = {"libkernel_sys.sprx", "libkernel.sprx", "libkernel_web.sprx"};
+    for (size_t i = 0; i < sizeof(libs) / sizeof(libs[0]) && set_buzzer == NULL; i++)
+    {
+        void *const lib = dlopen(libs[i], RTLD_NOW | RTLD_GLOBAL);
+        if (lib != NULL)
+            set_buzzer = (int (*)(int))dlsym(lib, "sceKernelIccSetBuzzer");
+    }
+    if (set_buzzer == NULL)
+    {
+        reply(client, "err beeper: sceKernelIccSetBuzzer unavailable");
+        return;
+    }
+    const int rc = set_buzzer(pattern);
+    reply(client, "%s beeper pattern=%d result=0x%08x", rc == 0 ? "ok" : "err", pattern,
+          (uint32_t)rc);
+}
+
 // df: free space per mounted volume.
 static void df(int client)
 {
@@ -2472,6 +2618,36 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     if (strcmp(command, "df") == 0)
     {
         df(client);
+        return 0;
+    }
+    if (strcmp(command, "led") == 0)
+    {
+        const char *const a = strtok(NULL, " \t");
+        const char *const b = strtok(NULL, " \t");
+        const char *const c = strtok(NULL, " \t");
+        if (a != NULL && c == NULL && strcmp(a, "off") == 0)
+            led_command(client, 0, 0, 0);
+        else if (a == NULL || b == NULL || c == NULL)
+            reply(client, "err usage: led BLUE WHITE AMBER (each 0..255 or -1), or led off");
+        else
+            led_command(client, atoi(a), atoi(b), atoi(c));
+        return 0;
+    }
+    if (strcmp(command, "fan") == 0)
+    {
+        const char *const sub = strtok(NULL, " \t");
+        if (sub != NULL && strcmp(sub, "set") == 0)
+            fan_command(client, strtok(NULL, " \t"));
+        else if (sub == NULL)
+            fan_command(client, NULL);
+        else
+            reply(client, "err usage: fan  (read duty) | fan set TEMP (30..90)");
+        return 0;
+    }
+    if (strcmp(command, "beeper") == 0)
+    {
+        const char *const pattern = strtok(NULL, " \t");
+        beeper_command(client, pattern != NULL ? atoi(pattern) : 1);
         return 0;
     }
     if (strcmp(command, "kill") == 0)

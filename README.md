@@ -112,6 +112,9 @@ disable that first.
 | `notify TYPE MESSAGE` | an on-screen message: `toast` (banner) or `flyout` (card) |
 | `hwinfo` | model, serial, CPU temp, all 64 SoC sensors (incl. the hottest), CPU clock |
 | `df` | free space per mounted volume |
+| `led BLUE WHITE AMBER` / `led off` | set the console indicator LED (levels 0..255), via `/dev/icc_indicator` |
+| `fan [TEMP]` | read the fan duty, or set the manual threshold (30..90 °C), via `/dev/icc_fan` |
+| `beeper [PATTERN]` | beep the console (`sceKernelIccSetBuzzer`, pattern 0..3) |
 | `kill PID` | end a process (not just a registered app) |
 | `peek PID ADDR LEN` / `poke PID ADDR HEX` | read / write a process's memory (writes are read back and verified) |
 | `scan PID ADDR LEN W VALUE` | find a `W`-byte integer (`W` = 1/2/4/8) in a span of a process's memory |
