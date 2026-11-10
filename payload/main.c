@@ -59,6 +59,8 @@
  *   fan [set TEMP]            read the fan duty, or set the threshold (30..90 C)
  *   beeper [PATTERN]|mute 0|1|vol 0..2   beep, mute, or set the beeper volume
  *   GET / , GET /api/hwinfo   a browser gets the live dashboard, hosted here
+ *   GET /api/run?c=CMD        the dashboard runs any command above; the reply
+ *                             is served as text, or as the picture/file it sends
  *   kill PID                  end a process
  *   peek PID ADDR LEN         read a process's memory
  *   poke PID ADDR HEX         write a process's memory (read back and verified)
@@ -111,6 +113,7 @@
  */
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -288,6 +291,50 @@ static void log_line(const char *format, ...)
     va_end(arguments);
 }
 
+/* When a browser invokes a command over HTTP (GET /api/run), the command's
+ * socket output -- its reply line and any file or picture bytes -- is collected
+ * here instead of being written to the socket, so the HTTP handler can wrap it
+ * in a response. One client is served at a time (the accept loop is serial), so
+ * a single buffer serves; the background threads never produce command output. */
+static struct
+{
+    char *buf;
+    size_t cap, len;
+    bool on, oom;
+} g_capture;
+
+// Every command-output write goes through here: into the capture buffer while a
+// browser's /api/run runs, to the socket otherwise. Returns len while capturing
+// so a caller's "short write" check sees a complete write.
+static ssize_t out(int client, const void *data, size_t len, int flags)
+{
+    if (!g_capture.on)
+        return send(client, data, len, flags);
+    if (!g_capture.oom && len > 0)
+    {
+        if (g_capture.len + len > g_capture.cap)
+        {
+            size_t want = g_capture.cap != 0 ? g_capture.cap : 8192;
+            while (want < g_capture.len + len)
+                want *= 2;
+            char *const bigger = realloc(g_capture.buf, want);
+            if (bigger == NULL)
+                g_capture.oom = true;
+            else
+            {
+                g_capture.buf = bigger;
+                g_capture.cap = want;
+            }
+        }
+        if (!g_capture.oom)
+        {
+            memcpy(g_capture.buf + g_capture.len, data, len);
+            g_capture.len += len;
+        }
+    }
+    return (ssize_t)len;
+}
+
 // Answer one line, newline terminated.
 static void reply(int client, const char *format, ...) __attribute__((format(printf, 2, 3)));
 static void reply(int client, const char *format, ...)
@@ -298,7 +345,7 @@ static void reply(int client, const char *format, ...)
     vsnprintf(line, sizeof(line), format, arguments);
     va_end(arguments);
     log_line("ps5loop: -> %s", line);
-    if (send(client, line, strlen(line), 0) < 0 || send(client, "\n", 1, 0) < 0)
+    if (out(client, line, strlen(line), 0) < 0 || out(client, "\n", 1, 0) < 0)
         log_line("ps5loop: reply failed: %s", strerror(errno));
 }
 
@@ -878,7 +925,7 @@ static void send_file(int client, const capture_t *capture)
     {
         for (ssize_t sent = 0; sent < bytes;)
         {
-            const ssize_t step = send(client, buffer + sent, (size_t)(bytes - sent), 0);
+            const ssize_t step = out(client, buffer + sent, (size_t)(bytes - sent), 0);
             if (step <= 0)
             {
                 close(file);
@@ -1003,7 +1050,7 @@ static bool direct_shot(int client, int type, int wait_ms, char *report, size_t 
           (long long)status.st_mtime, (uint32_t)deleted, path);
     for (off_t sent = 0; sent < have;)
     {
-        const ssize_t step = send(client, bytes + sent, (size_t)(have - sent), 0);
+        const ssize_t step = out(client, bytes + sent, (size_t)(have - sent), 0);
         if (step <= 0)
             break;
         sent += step;
@@ -1087,7 +1134,7 @@ static void send_bytes(int client, const char *what, const char *buffer, size_t 
     reply(client, "ok file size=%zu mtime=0 path=%s", size, what);
     for (size_t sent = 0; sent < size;)
     {
-        const ssize_t step = send(client, buffer + sent, size - sent, 0);
+        const ssize_t step = out(client, buffer + sent, size - sent, 0);
         if (step <= 0)
             break;
         sent += (size_t)step;
@@ -1355,7 +1402,7 @@ static void get_file(int client, const char *path)
         bool broken = false;
         for (ssize_t sent = 0; sent < got;)
         {
-            const ssize_t step = send(client, buffer + sent, (size_t)(got - sent), 0);
+            const ssize_t step = out(client, buffer + sent, (size_t)(got - sent), 0);
             if (step <= 0)
             {
                 broken = true;
@@ -2620,6 +2667,116 @@ static void http_send(int client, const char *status, const char *ctype, const v
     }
 }
 
+// handle_command runs any text command; the dashboard's /api/run reaches it
+// through http_run below, which captures the output instead of writing it.
+static int handle_command(int client, char *line, const char *body, size_t body_len);
+
+// Percent-decode a URL component into dst; '+' becomes a space.
+static void url_decode(char *dst, size_t dst_size, const char *src)
+{
+    size_t o = 0;
+    for (size_t i = 0; src[i] != '\0' && o + 1 < dst_size; i++)
+    {
+        if (src[i] == '%' && isxdigit((unsigned char)src[i + 1]) &&
+            isxdigit((unsigned char)src[i + 2]))
+        {
+            const char hex[3] = {src[i + 1], src[i + 2], '\0'};
+            dst[o++] = (char)strtol(hex, NULL, 16);
+            i += 2;
+        }
+        else if (src[i] == '+')
+            dst[o++] = ' ';
+        else
+            dst[o++] = src[i];
+    }
+    dst[o] = '\0';
+}
+
+// The content type to serve a captured "ok file" reply as, by its path's
+// extension; NULL means "serve it as text" (ps, ls, settings, a text file).
+static const char *content_type_for(const char *path)
+{
+    const char *const dot = strrchr(path, '.');
+    if (dot != NULL)
+    {
+        if (strcasecmp(dot, ".jpg") == 0 || strcasecmp(dot, ".jpeg") == 0)
+            return "image/jpeg";
+        if (strcasecmp(dot, ".png") == 0)
+            return "image/png";
+        if (strcasecmp(dot, ".jxr") == 0)
+            return "image/vnd.ms-photo";
+    }
+    return NULL;
+}
+
+// Run one text command for a browser and wrap its output in an HTTP response.
+// The command's socket output is captured (see out()): a single "ok file ..."
+// reply (frame, screenshot, get, ps, ls, ...) is served as that file -- a
+// picture inline, text as text -- and every other reply is served as text.
+static void http_run(int client, const char *query, bool head_only)
+{
+    const char *c = NULL;
+    if (query != NULL && strncmp(query, "c=", 2) == 0)
+        c = query + 2;
+    else if (query != NULL)
+    {
+        const char *const at = strstr(query, "&c=");
+        if (at != NULL)
+            c = at + 3;
+    }
+    if (c == NULL)
+    {
+        http_send(client, "400 Bad Request", "text/plain; charset=utf-8",
+                  "usage: /api/run?c=<command>", 27, head_only);
+        return;
+    }
+    char raw[PS5LOOP_LINE];
+    snprintf(raw, sizeof(raw), "%s", c);
+    char *const amp = strchr(raw, '&');
+    if (amp != NULL)
+        *amp = '\0';
+    char decoded[PS5LOOP_LINE] = {0};
+    url_decode(decoded, sizeof(decoded), raw);
+    // These need a connection the browser cannot give (an upload body, a live
+    // stream) or would end the payload: they are not offered over HTTP.
+    char verb[32] = {0};
+    (void)sscanf(decoded, "%31s", verb);
+    if (verb[0] == '\0' || strcmp(verb, "put") == 0 || strcmp(verb, "quit") == 0 ||
+        strcmp(verb, "klog-stream") == 0 || strcmp(verb, "GET") == 0 || strcmp(verb, "HEAD") == 0)
+    {
+        http_send(client, "400 Bad Request", "text/plain; charset=utf-8",
+                  "command not available over HTTP", 31, head_only);
+        return;
+    }
+    g_capture.len = 0;
+    g_capture.oom = false;
+    g_capture.on = true;
+    (void)handle_command(client, decoded, NULL, 0);
+    g_capture.on = false;
+    if (g_capture.oom || g_capture.buf == NULL)
+    {
+        http_send(client, "500 Internal Server Error", "text/plain; charset=utf-8",
+                  "capture failed", 14, head_only);
+        return;
+    }
+    char *const data = g_capture.buf;
+    const size_t total = g_capture.len;
+    size_t head = 0;
+    while (head < total && data[head] != '\n')
+        head++;
+    // "ok file size=N ... path=P\n" then N bytes: serve the bytes as the file.
+    if (total >= 8 && memcmp(data, "ok file ", 8) == 0 && head < total)
+    {
+        data[head] = '\0';
+        const char *const key = strstr(data, "path=");
+        const char *const ctype = key != NULL ? content_type_for(key + 5) : NULL;
+        http_send(client, "200 OK", ctype != NULL ? ctype : "text/plain; charset=utf-8",
+                  data + head + 1, total - head - 1, head_only);
+        return;
+    }
+    http_send(client, "200 OK", "text/plain; charset=utf-8", data, total, head_only);
+}
+
 static void http_serve_page(int client, const char *verb, const char *url)
 {
     const bool head_only = strcmp(verb, "HEAD") == 0;
@@ -2639,6 +2796,11 @@ static void http_serve_page(int client, const char *verb, const char *url)
         else
             http_send(client, "200 OK", "application/json", json, strlen(json), head_only);
         free(json);
+        return;
+    }
+    if (strncmp(url, "/api/run", 8) == 0 && (url[8] == '\0' || url[8] == '?'))
+    {
+        http_run(client, url[8] == '?' ? url + 9 : NULL, head_only);
         return;
     }
     http_send(client, "404 Not Found", "text/plain; charset=utf-8", "not found", 9, head_only);
@@ -2766,7 +2928,7 @@ static int handle_command(int client, char *line, const char *body, size_t body_
         reply(client, "ok file size=%zu mtime=0 path=klog", used);
         for (size_t sent = 0; buffer != NULL && sent < used;)
         {
-            const ssize_t step = send(client, buffer + sent, used - sent, 0);
+            const ssize_t step = out(client, buffer + sent, used - sent, 0);
             if (step <= 0)
                 break;
             sent += (size_t)step;

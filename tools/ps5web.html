@@ -8,7 +8,7 @@
   :root {
     --bg: #0a0e16; --panel: #141b28; --panel2: #1b2433; --line: #26324a;
     --text: #e6edf6; --muted: #8696ad; --accent: #2e8bff;
-    --cool: #46d1a2; --warm: #f2c14e; --hot: #f2584e;
+    --cool: #46d1a2; --warm: #f2c14e; --hot: #f2584e; --danger: #f2584e;
   }
   * { box-sizing: border-box; }
   body {
@@ -56,6 +56,57 @@
   .chip .c { font-weight: 650; }
   .chip.hot { border-color: var(--hot); } .chip.warm { border-color: var(--warm); }
   footer { color: var(--muted); font-size: 12px; margin-top: 18px; text-align: center; }
+
+  /* ---- control panel ---- */
+  h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted);
+    margin: 26px 2px 10px; font-weight: 650; }
+  .panel { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  @media (max-width: 680px) { .panel { grid-template-columns: 1fr; } }
+  .pcard { background: linear-gradient(180deg, var(--panel2), var(--panel));
+    border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
+  .pcard.wide { grid-column: 1 / -1; }
+  .pcard h3 { margin: 0 0 10px; font-size: 14px; font-weight: 650; }
+  .pcard h3 small { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+  .row label { color: var(--muted); font-size: 12px; min-width: 42px; }
+  input, select {
+    background: #0d1420; color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 9px; font: inherit; font-size: 13px; min-width: 0;
+  }
+  input { flex: 1 1 90px; }
+  input[type=number] { flex: 0 0 76px; }
+  input[type=color] { flex: 0 0 44px; padding: 2px; height: 34px; }
+  button {
+    background: #21324d; color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 7px 12px; font: inherit; font-size: 13px; font-weight: 550;
+    cursor: pointer; transition: background .12s, border-color .12s;
+  }
+  button:hover { background: #2a406380; border-color: var(--accent); }
+  button:active { background: var(--accent); }
+  button.wide { width: 100%; }
+  button.danger { border-color: #5a2a2f; color: #ffb4ad; }
+  button.danger:hover { background: #3a1f24; border-color: var(--danger); }
+  button.go { background: #1d3a6b; }
+  .hint { color: var(--muted); font-size: 12px; margin: 2px 0 8px; }
+  /* virtual pad layout */
+  .pad { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: center; justify-items: center; }
+  .cluster { display: grid; grid-template-columns: repeat(3, 40px); grid-template-rows: repeat(3, 40px);
+    gap: 4px; }
+  .cluster button { padding: 0; width: 40px; height: 40px; border-radius: 10px; font-size: 15px; }
+  .cluster .c-up { grid-area: 1 / 2; } .cluster .c-left { grid-area: 2 / 1; }
+  .cluster .c-right { grid-area: 2 / 3; } .cluster .c-down { grid-area: 3 / 2; }
+  .cluster .c-tri { grid-area: 1 / 2; } .cluster .c-sq { grid-area: 2 / 1; }
+  .cluster .c-ci { grid-area: 2 / 3; } .cluster .c-cr { grid-area: 3 / 2; }
+  .pad-sys { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-top: 6px; }
+  .pad-sys button { padding: 6px 9px; font-size: 12px; }
+  /* output */
+  #out { background: #080c14; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+    font: 12px/1.5 ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: #bcd0ea;
+    white-space: pre-wrap; word-break: break-word; max-height: 300px; overflow: auto; margin: 0; }
+  #out .ok { color: var(--cool); } #out .err { color: var(--hot); } #out .cmd { color: var(--accent); }
+  #shot { margin-top: 10px; }
+  #shot img { max-width: 100%; border-radius: 10px; border: 1px solid var(--line); display: block; }
+  .outhead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
 </style>
 </head>
 <body>
@@ -116,13 +167,226 @@
     <canvas id="chart"></canvas>
   </div>
 
-  <footer>Polling the console every 2&nbsp;s · hardware info via the DevLoop payload</footer>
+  <!-- ================= control panel ================= -->
+  <h2 class="section">Control</h2>
+
+  <!-- output console -->
+  <div class="pcard wide">
+    <div class="outhead">
+      <h3 style="margin:0">Console output</h3>
+      <div class="row" style="margin:0">
+        <button id="clear">Clear</button>
+      </div>
+    </div>
+    <pre id="out">Ready. Commands run on the console through GET /api/run.</pre>
+    <div id="shot"></div>
+  </div>
+
+  <div class="panel">
+
+    <!-- virtual pad -->
+    <div class="pcard">
+      <h3>Virtual pad <small>input</small></h3>
+      <div class="row">
+        <button class="go" onclick="run('pad open')">Open</button>
+        <button onclick="run('pad open keep')">Open · beside</button>
+        <button onclick="run('pad close')">Close</button>
+        <button onclick="run('pad status')">Status</button>
+      </div>
+      <div class="hint">Open takes the controller from the player (unless · beside). A title needs the pad open before it reads a press.</div>
+      <div class="row"><label>Hold</label>
+        <input type="number" id="pad-ms" value="100" min="1" max="10000"> <span class="hint" style="margin:0">ms per tap</span>
+      </div>
+      <div class="pad">
+        <div class="cluster">
+          <button class="c-up" onclick="tap('up')">▲</button>
+          <button class="c-left" onclick="tap('left')">◀</button>
+          <button class="c-right" onclick="tap('right')">▶</button>
+          <button class="c-down" onclick="tap('down')">▼</button>
+        </div>
+        <div class="cluster">
+          <button class="c-tri" onclick="tap('triangle')">△</button>
+          <button class="c-sq" onclick="tap('square')">□</button>
+          <button class="c-ci" onclick="tap('circle')">○</button>
+          <button class="c-cr" onclick="tap('cross')">✕</button>
+        </div>
+      </div>
+      <div class="pad-sys">
+        <button onclick="tap('l1')">L1</button>
+        <button onclick="tap('r1')">R1</button>
+        <button onclick="tap('l2')">L2</button>
+        <button onclick="tap('r2')">R2</button>
+        <button onclick="tap('l3')">L3</button>
+        <button onclick="tap('r3')">R3</button>
+      </div>
+      <div class="pad-sys">
+        <button onclick="tap('options')">Options</button>
+        <button onclick="tap('touchpad')">Touchpad</button>
+        <button onclick="tap('create')">Create</button>
+        <button onclick="tap('ps')">PS</button>
+      </div>
+    </div>
+
+    <!-- sight -->
+    <div class="pcard">
+      <h3>Sight <small>frame &amp; screenshot</small></h3>
+      <div class="row">
+        <button class="go" onclick="run('screenshot')">Screenshot</button>
+        <button onclick="run('latest-capture')">Latest capture</button>
+        <button onclick="run('list-captures')">List captures</button>
+      </div>
+      <div class="hint">Screenshot needs the pad open (it holds Create). The whole screen; ~3 s. HDR captures are JXR, which a browser may not display.</div>
+      <div class="row"><label>Request</label><input id="fr-req" placeholder="/data/homebrew/PPSA.../devloop-shot"></div>
+      <div class="row"><label>Folder</label><input id="fr-dir" placeholder="/data/homebrew/PPSA.../screenshots"></div>
+      <div class="row"><button class="go wide" onclick="frame()">Frame (title's own)</button></div>
+    </div>
+
+    <!-- apps -->
+    <div class="pcard">
+      <h3>Apps &amp; system</h3>
+      <div class="row">
+        <button onclick="run('ps')">ps</button>
+        <button onclick="run('locate-title')">locate-title</button>
+        <button onclick="run('df')">df</button>
+        <button onclick="run('hwinfo')">hwinfo</button>
+        <button onclick="run('settings')">settings</button>
+      </div>
+      <div class="row"><label>Launch</label><input id="app-launch" placeholder="PPSA00000">
+        <button onclick="runIf('app-launch', id => 'launch ' + id)">Go</button></div>
+      <div class="row"><label>Close</label><input id="app-close" placeholder="app id (blank = foreground)">
+        <button onclick="run('close-app ' + val('app-close'))">Go</button></div>
+      <div class="row"><label>URL</label><input id="app-url" placeholder="https://example.com">
+        <button onclick="runIf('app-url', u => 'open-url ' + u)">Open</button></div>
+      <div class="row"><label>Notify</label>
+        <select id="nt-type"><option value="toast">toast</option><option value="flyout">flyout</option></select>
+        <input id="nt-msg" placeholder="message">
+        <button onclick="runIf('nt-msg', m => 'notify ' + val('nt-type') + ' ' + m)">Send</button></div>
+      <div class="row"><label>Install</label><input id="app-pkg" placeholder="/path/to.pkg">
+        <button class="danger" onclick="runIf('app-pkg', p => 'install ' + p, 'Install this package?')">Install</button></div>
+      <div class="row"><label>Remove</label><input id="app-uninstall" placeholder="PPSA00000">
+        <button class="danger" onclick="runIf('app-uninstall', id => 'uninstall ' + id, 'Uninstall this title? This cannot be undone.')">Uninstall</button></div>
+    </div>
+
+    <!-- files -->
+    <div class="pcard">
+      <h3>Files</h3>
+      <div class="row"><label>ls</label><input id="f-ls" value="/" placeholder="/path">
+        <button onclick="runIf('f-ls', p => 'ls ' + p)">List</button></div>
+      <div class="row"><label>get</label><input id="f-get" placeholder="/path/to/file">
+        <button onclick="getFile()">Download</button></div>
+      <div class="row"><label>hash</label><input id="f-hash" placeholder="/path/to/file">
+        <button onclick="runIf('f-hash', p => 'hash ' + p)">SHA-256</button></div>
+      <div class="row"><label>mv</label><input id="f-mv-a" placeholder="/from"><input id="f-mv-b" placeholder="/to">
+        <button onclick="run('mv ' + val('f-mv-a') + ' ' + val('f-mv-b'))">Move</button></div>
+      <div class="row"><label>rm</label><input id="f-rm" placeholder="/path">
+        <button class="danger" onclick="runIf('f-rm', p => 'rm ' + p, 'Delete this file?')">Delete</button></div>
+      <div class="row"><label>capture</label><input id="f-delcap" placeholder="/user/av_contents/...">
+        <button class="danger" onclick="runIf('f-delcap', p => 'delete-capture ' + p, 'Delete this capture (file, thumbnail, row)?')">delete-capture</button></div>
+      <div class="hint">put (upload) is CLI-only. Downloads open in a new tab.</div>
+    </div>
+
+    <!-- hardware -->
+    <div class="pcard">
+      <h3>Indicator LED, fan, beeper</h3>
+      <div class="row"><label>LED</label>
+        <span class="hint" style="margin:0">B/W/A 0–255</span>
+        <input type="number" id="led-b" value="0" min="0" max="255">
+        <input type="number" id="led-w" value="0" min="0" max="255">
+        <input type="number" id="led-a" value="0" min="0" max="255">
+        <button onclick="run('led ' + val('led-b') + ' ' + val('led-w') + ' ' + val('led-a'))">Set</button></div>
+      <div class="row">
+        <button onclick="run('led off')">Off</button>
+        <button onclick="run('led auto')">Auto</button>
+        <button onclick="run('led breathe ' + val('led-b') + ' ' + val('led-w') + ' ' + val('led-a'))">Breathe</button>
+        <button onclick="run('led chase')">Chase</button>
+      </div>
+      <div class="row"><label>Fan</label>
+        <button onclick="run('fan')">Read duty</button>
+        <input type="number" id="fan-t" value="60" min="30" max="90">
+        <button onclick="run('fan set ' + val('fan-t'))">Set °C</button></div>
+      <div class="row"><label>Beeper</label>
+        <input type="number" id="beep-p" value="1" min="1" max="9">
+        <button onclick="run('beeper ' + val('beep-p'))">Beep</button>
+        <button onclick="run('beeper mute 1')">Mute</button>
+        <button onclick="run('beeper mute 0')">Unmute</button>
+        <select id="beep-v"><option>0</option><option>1</option><option selected>2</option></select>
+        <button onclick="run('beeper vol ' + val('beep-v'))">Vol</button></div>
+      <div class="row"><label>Lightbar</label>
+        <input type="number" id="lb-r" value="0" min="0" max="255">
+        <input type="number" id="lb-g" value="0" min="0" max="255">
+        <input type="number" id="lb-b" value="0" min="0" max="255">
+        <button onclick="run('lightbar ' + val('lb-r') + ' ' + val('lb-g') + ' ' + val('lb-b'))">Try</button></div>
+      <div class="hint">Lightbar is a diagnostic: SceShellUI owns the pad, so it is expected to report ALREADY_OPENED.</div>
+    </div>
+
+    <!-- memory / process -->
+    <div class="pcard">
+      <h3>Process &amp; memory <small>advanced</small></h3>
+      <div class="row"><label>modules</label><input id="m-mods" placeholder="pid">
+        <button onclick="runIf('m-mods', p => 'modules ' + p)">List</button></div>
+      <div class="row"><label>module</label><input id="m-mod-p" type="number" placeholder="pid"><input id="m-mod-n" placeholder="name">
+        <button onclick="run('module ' + val('m-mod-p') + ' ' + val('m-mod-n'))">Map</button></div>
+      <div class="row"><label>dlsym</label><input id="m-dl-p" type="number" placeholder="pid"><input id="m-dl-n" placeholder="module"><input id="m-dl-s" placeholder="symbol">
+        <button onclick="run('dlsym ' + val('m-dl-p') + ' ' + val('m-dl-n') + ' ' + val('m-dl-s'))">Resolve</button></div>
+      <div class="row"><label>call</label><input id="m-call" placeholder="pid addr [arg0..arg5]">
+        <button class="danger" onclick="runIf('m-call', a => 'call ' + a, 'Call a function in that process?')">call</button></div>
+      <div class="row"><label>peek</label><input id="m-peek" placeholder="pid addr len">
+        <button onclick="runIf('m-peek', a => 'peek ' + a)">Read</button></div>
+      <div class="row"><label>poke</label><input id="m-poke" placeholder="pid addr hex">
+        <button class="danger" onclick="runIf('m-poke', a => 'poke ' + a, 'Write that process memory?')">Write</button></div>
+      <div class="row"><label>scan</label><input id="m-scan" placeholder="pid addr len width value">
+        <button onclick="runIf('m-scan', a => 'scan ' + a)">int</button>
+        <input id="m-aob" placeholder="pid addr len pattern">
+        <button onclick="runIf('m-aob', a => 'scan-aob ' + a)">aob</button></div>
+      <div class="row"><label>kern</label><input id="m-kr" placeholder="addr len">
+        <button onclick="runIf('m-kr', a => 'kern-read ' + a)">read</button>
+        <input id="m-kw" placeholder="addr hex">
+        <button class="danger" onclick="runIf('m-kw', a => 'kern-write ' + a, 'Write kernel memory?')">write</button></div>
+      <div class="row"><label>exec</label><input id="m-exec" placeholder="/path [args]">
+        <button class="danger" onclick="runIf('m-exec', a => 'exec ' + a, 'Run that binary on the console?')">Run</button></div>
+      <div class="row"><label>kill</label><input id="m-kill" type="number" placeholder="pid">
+        <button class="danger" onclick="runIf('m-kill', p => 'kill ' + p, 'Kill that process?')">Kill</button></div>
+      <div class="row"><label>setting</label><input id="m-set" placeholder="regId value">
+        <button class="danger" onclick="runIf('m-set', a => 'setting-set ' + a, 'Write that system setting?')">setting-set</button></div>
+      <div class="row"><label>klog</label><input id="m-klog" type="number" value="1500" min="1" max="15000">
+        <button onclick="run('kernel-log ' + val('m-klog'))">Dump</button>
+        <label>http</label><input id="m-http" placeholder="http://...">
+        <button onclick="runIf('m-http', u => 'http ' + u)">Fetch</button></div>
+    </div>
+
+    <!-- raw + power -->
+    <div class="pcard wide">
+      <h3>Raw command &amp; power</h3>
+      <div class="row">
+        <input id="raw" placeholder="any command, e.g. pad tap 4000 120">
+        <button class="go" onclick="runIf('raw', c => c)">Run</button>
+      </div>
+      <div class="hint">Runs verbatim through /api/run. Every command in AGENTS.md works here.</div>
+      <div class="row">
+        <button class="danger" onclick="runIf(null, () => 'power rest', 'Put the console into rest mode?')">power rest</button>
+        <button class="danger" onclick="runIf(null, () => 'power reboot', 'Reboot the console?')">power reboot</button>
+        <button class="danger" onclick="runIf(null, () => 'power off', 'Power the console off? It cannot be woken from here.')">power off</button>
+      </div>
+    </div>
+
+  </div>
+
+  <footer>Polling the console every 2&nbsp;s · hardware info and control via the DevLoop payload</footer>
 </div>
 
 <script>
 const MAX = 120;                 // ~4 minutes of 2 s samples
 const hist = { cpu: [], soc: [] };
 const zone = t => t == null ? "var(--cool)" : t >= 75 ? "var(--hot)" : t >= 58 ? "var(--warm)" : "var(--cool)";
+
+// DualSense button masks (match tools/ps5loop.py BUTTONS).
+const BTN = {
+  create: 0x1, l3: 0x2, r3: 0x4, options: 0x8,
+  up: 0x10, right: 0x20, down: 0x40, left: 0x80,
+  l2: 0x100, r2: 0x200, l1: 0x400, r1: 0x800,
+  triangle: 0x1000, circle: 0x2000, cross: 0x4000, square: 0x8000,
+  ps: 0x10000, touchpad: 0x100000,
+};
 
 function setGauge(id, temp) {
   const g = document.getElementById(id);
@@ -211,6 +475,80 @@ async function poll() {
     status(false, "disconnected (" + e.message + ")");
   }
 }
+
+// ---- control panel ----
+const out = document.getElementById("out");
+const shot = document.getElementById("shot");
+const val = id => document.getElementById(id).value.trim();
+
+function esc(s) { return s.replace(/[&<>]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c])); }
+
+function logLine(text, cls) {
+  const first = out.textContent === "" || out.dataset.virgin === "1";
+  if (out.dataset.virgin === undefined && first) out.textContent = "";
+  out.dataset.virgin = "0";
+  const span = document.createElement("div");
+  if (cls) span.className = cls;
+  span.textContent = text;
+  out.appendChild(span);
+  out.scrollTop = out.scrollHeight;
+}
+
+// Run a command on the console. Images (frame/screenshot/capture) render inline;
+// everything else prints to the output console.
+async function run(cmd) {
+  cmd = cmd.trim();
+  if (!cmd) return;
+  logLine("» " + cmd, "cmd");
+  try {
+    const r = await fetch("/api/run?c=" + encodeURIComponent(cmd), { cache: "no-store" });
+    const type = r.headers.get("content-type") || "";
+    if (type.startsWith("image/")) {
+      const blob = await r.blob();
+      const url = URL.createObjectURL(blob);
+      const img = new Image();
+      img.src = url;
+      img.onload = () => { shot.innerHTML = ""; shot.appendChild(img); };
+      logLine("  → image (" + blob.size + " bytes, " + type + ")", "ok");
+    } else {
+      const text = (await r.text()).replace(/\s+$/, "");
+      const cls = /^ok\b/.test(text) ? "ok" : /^err\b/.test(text) ? "err" : "";
+      logLine(text || "(no output)", cls);
+    }
+  } catch (e) {
+    logLine("  → request failed: " + e.message, "err");
+  }
+}
+
+// Run only if the named field is non-empty; build the command from its value.
+// id null = no field (the builder takes no input). confirmMsg gates destructive ones.
+function runIf(id, build, confirmMsg) {
+  const v = id == null ? "" : val(id);
+  if (id != null && !v) { logLine("  → fill the field first", "err"); return; }
+  if (confirmMsg && !window.confirm(confirmMsg)) return;
+  run(build(v));
+}
+
+function tap(name) {
+  const ms = parseInt(val("pad-ms"), 10) || 100;
+  run("pad tap " + BTN[name].toString(16) + " " + ms);
+}
+
+function frame() {
+  const req = val("fr-req"), dir = val("fr-dir");
+  if (!req || !dir) { logLine("  → frame needs both a request file and a folder", "err"); return; }
+  run("frame " + req + " " + dir);
+}
+
+// get: let the browser handle the download/preview in a new tab.
+function getFile() {
+  const p = val("f-get");
+  if (!p) { logLine("  → fill the path first", "err"); return; }
+  logLine("» get " + p + "  (opening in a new tab)", "cmd");
+  window.open("/api/run?c=" + encodeURIComponent("get " + p), "_blank");
+}
+
+document.getElementById("clear").onclick = () => { out.textContent = ""; out.dataset.virgin = "1"; shot.innerHTML = ""; };
 
 window.addEventListener("resize", drawChart);
 poll();
