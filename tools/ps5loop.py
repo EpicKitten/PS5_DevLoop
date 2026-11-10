@@ -164,6 +164,15 @@ def load(args):
     raise SystemExit("ps5loop: loaded, but the payload does not answer; read klog")
 
 
+def run_tool(command):
+    """Run a decode or convert helper. Returns the result, or None when the tool
+    is not installed, so a capture is kept raw instead of crashing the client."""
+    try:
+        return subprocess.run(command, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        return None
+
+
 def to_png(data, target):
     """Write a capture as a PNG to look at, whatever the console saved it as."""
     target = Path(target)
@@ -177,12 +186,15 @@ def to_png(data, target):
         # screen's 10-bit pictures as a packed TIFF that nothing reads back
         # correctly. A title's 8-bit pictures refuse that conversion and decode
         # as they are.
+        decoded = None
         for conversion in (["-c", "9"], []):
             tiff.unlink(missing_ok=True)
-            decoded = subprocess.run(["JxrDecApp", "-i", str(raw), "-o", str(tiff), *conversion],
-                                     capture_output=True, text=True, check=False)
-            if decoded.returncode == 0 and tiff.is_file():
+            decoded = run_tool(["JxrDecApp", "-i", str(raw), "-o", str(tiff), *conversion])
+            if decoded is None or (decoded.returncode == 0 and tiff.is_file()):
                 break
+        if decoded is None:
+            print(f"kept {raw}: install jxrlib (JxrDecApp) to decode the console's HDR captures")
+            return raw
         if decoded.returncode != 0 or not tiff.is_file():
             print(f"kept {raw}: JxrDecApp could not decode it ({decoded.stdout.strip()[-200:]})")
             return raw
@@ -194,9 +206,11 @@ def to_png(data, target):
         source.write_bytes(data)
     # Only the console's HDR pictures need their levels stretched to be readable.
     levels = ["-auto-level"] if source.suffix == ".tif" else []
-    scaled = subprocess.run(["magick", str(source), *levels, "-resize", f"{VIEW_WIDTH}x>",
-                             "-depth", "8", str(target)],
-                            capture_output=True, text=True, check=False)
+    scaled = run_tool(["magick", str(source), *levels, "-resize", f"{VIEW_WIDTH}x>",
+                       "-depth", "8", str(target)])
+    if scaled is None:
+        print(f"kept {source}: install ImageMagick (magick) to scale captures for viewing")
+        return source
     if scaled.returncode != 0:
         print(f"kept {source}: magick could not convert it ({scaled.stderr.strip()[-200:]})")
         return source

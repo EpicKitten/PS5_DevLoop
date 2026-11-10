@@ -131,8 +131,9 @@ Measured live. Firmware 12.20 and 13.60 behave the same unless noted.
   `0x803b0006`, device id = `InsertData` handle, `bind` 0, input driving a
   homebrew launcher once the real pad is evicted). This console runs no klog
   server, so the payload reads `/dev/klog`; `shot`'s Create hold and its
-  `sceContentDeleteByPath` cleanup both work. Use `ps5loop.py klog` to read the
-  log on a console whose server is absent.
+  `sceContentDeleteByPath` cleanup both work. The direct screenshot service
+  (`capture`) answers `0x80be000a`, so as on 13.60 only the Create hold works.
+  Use `ps5loop.py klog` to read the log on a console whose server is absent.
 
 ## Limits
 
@@ -160,7 +161,18 @@ payload's command server follows `ps5vkctl` from
 [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan) by Mihawk. Built with the
 [PS5 payload SDK](https://github.com/ps5-payload-dev/sdk).
 
-Not affiliated with Sony Interactive Entertainment.
+Two MCP projects that give an agent eyes and hands on a jailbroken PS5 informed
+DevLoop's design, and are worth a look for anyone building in this space:
+
+- [ps5-mcp](https://github.com/Darkatek7/ps5-mcp) by Darkatek7 — a Python MCP
+  server with a virtual pad and direct Avcap2 capture, plus title, power, FTP
+  and klog control, built to test homebrew without a capture card.
+- [ps5-mcp](https://github.com/leolobato/ps5-mcp) by leolobato — a capture-card
+  approach (as here) with `padd` over TCP, a shared-console claim queue, visual
+  template matching, and input record/replay.
+
+Both are GPL-3.0; no code from either is used here. Not affiliated with Sony
+Interactive Entertainment.
 
 ## License
 
