@@ -8,6 +8,11 @@ kernel helper, or a device ioctl.
 
 Legend: **done** = implemented and verified on firmware 12.20.
 
+**Status (2026-11-10): complete.** Every feasible capability is implemented and
+verified on 12.20 (see "Verification status"). What remains is three items that
+are architecturally impossible from a background payload, deferred with the
+owner's approval — the honest edge of this design, not unfinished work.
+
 ## Done
 
 - **Input** — virtual DualSense: `open`/`close`, `press`, `hold`, `release`, `seq`.
@@ -66,7 +71,11 @@ access) should `peek`/`poke` ever want it instead of `mdbg`, which they use toda
 
 These three cannot be done from DevLoop's background payload in this environment —
 each needs a subsystem the payload fundamentally lacks, not just more code. They
-are the honest edge of what this design reaches.
+are the honest edge of what this design reaches. **Deferred with approval
+(2026-11-10):** accepted as out of reach for this design — the pad block is
+demonstrated live by `lightbar`, and modal dialogs / live framebuffer have no
+API a background payload can even invoke to attempt. Pursuing the physical pad
+would mean a dedicated SceShellUI-bridge project, out of scope for this roadmap.
 
 - **DualSense lightbar / rumble / triggers** — `scePadSetLightBar`,
   `scePadSetVibration`, `scePadSetTriggerEffect` need a `scePad` handle to the
