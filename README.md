@@ -303,6 +303,11 @@ payload's command server follows `ps5vkctl` from
 [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan) by Mihawk. Built with the
 [PS5 payload SDK](https://github.com/ps5-payload-dev/sdk).
 
+The dashboard page embeds [uPlot](https://github.com/leeoniya/uPlot) (MIT) for its
+charts and [jpegxr](https://github.com/brion/jpegxr) (BSD-3-Clause; Microsoft's
+jxrlib as WebAssembly, wrapped by Brion Vibber) to show the console's JPEG XR
+captures; its licence is in `third_party/jpegxr-LICENSE.md`.
+
 Two MCP projects that give an agent eyes and hands on a jailbroken PS5 informed
 DevLoop's design, and are worth a look for anyone building in this space:
 
