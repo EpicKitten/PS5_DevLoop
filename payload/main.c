@@ -52,7 +52,8 @@
  *   uninstall TITLE_ID        uninstall a title
  *   power off|reboot|rest     power off, reboot, or enter rest mode
  *   notify TYPE MESSAGE       show a message: TYPE is toast or flyout
- *   hwinfo                    model, serial, cpu + all SoC temps, cpu clock, fan %
+ *   hwinfo                    model, serial, cpu + all SoC temps, cpu clock, fan %,
+ *                             SoC power
  *   df                        free space per mounted volume
  *   led BWA|off|auto|breathe B W A [MS]|chase [MS]   the console indicator LED
  *   lightbar R G B            attempt the physical pad lightbar (shell owns it)
@@ -1959,6 +1960,14 @@ int sceKernelGetSocSensorTemperature(int, int *);
 // Current (not manual) fan duty: raw value, percent = raw/10. The /dev/icc_fan
 // GET_DUTY ioctl only reports the *manual* duty (0 in auto mode), so use this.
 int sceKernelGetCurrentFanDuty(uint16_t *, void *);
+// SoC power, from the AMD power-management processor (/dev/mp1, ioctl 0xc070ae1f).
+// It fills 0x70 bytes: 28 little-endian uint32. Probed on 12.20: [0..2] and [3..5]
+// are two supply rails, each as power mW, voltage mV, current mA (mW = mV x mA
+// holds on every sample); the rest (what looks like per-rail peaks, an input
+// voltage and a temperature) is not reported here. Which rail feeds the CPU and
+// which the GPU is not established, so they are reported as rails A and B.
+int sceKernelGetSocPowerConsumption(void *);
+#define HWINFO_POWER_WORDS 28
 
 // The SoC exposes many thermal sensors, not one: sceKernelGetSocSensorTemperature
 // answers for ids 0..63 (probed on 13.60; a few succeed on 12.20). Scan them all
@@ -1978,6 +1987,8 @@ typedef struct hwinfo
     int socMaxId;
     int socN;    // how many sensors answered plausibly
     int fanPct;  // current fan duty 0..100, or -1 if the call is unavailable
+    bool powerOk; // the SoC power call answered
+    uint32_t railmW[2], railmV[2], railmA[2];
     int socIds[HWINFO_SOC_SENSORS];
     int socVals[HWINFO_SOC_SENSORS];
 } hwinfo_t;
@@ -2024,6 +2035,19 @@ static void hwinfo_read(hwinfo_t *h)
             h->fanPct = p;
         }
     }
+    {
+        uint32_t words[HWINFO_POWER_WORDS + 4] = {0}; // a little slack past the 0x70 bytes
+        if (sceKernelGetSocPowerConsumption(words) == 0)
+        {
+            h->powerOk = true;
+            for (int rail = 0; rail < 2; rail++)
+            {
+                h->railmW[rail] = words[rail * 3];
+                h->railmV[rail] = words[rail * 3 + 1];
+                h->railmA[rail] = words[rail * 3 + 2];
+            }
+        }
+    }
 }
 
 static void hwinfo(int client)
@@ -2032,8 +2056,10 @@ static void hwinfo(int client)
     hwinfo_read(&h);
     reply(client,
           "ok fw=0x%08x model=%s serial=%s cpuC=%d socC=%d socMax=%d socMaxId=%d socN=%d cpuMHz=%ld "
-          "fanPct=%d",
-          h.fw, h.model, h.serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz, h.fanPct);
+          "fanPct=%d socmW=%d railAmW=%d railBmW=%d",
+          h.fw, h.model, h.serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz, h.fanPct,
+          h.powerOk ? (int)(h.railmW[0] + h.railmW[1]) : -1, h.powerOk ? (int)h.railmW[0] : -1,
+          h.powerOk ? (int)h.railmW[1] : -1);
 }
 
 // The same reading as a JSON object, for the dashboard the console hosts. The
@@ -2050,9 +2076,18 @@ static char *hwinfo_json(void)
     json = text_append(json, &cap, &used,
                        "{\"ok\":true,\"fw\":\"0x%08x\",\"model\":\"%s\",\"serial\":\"%s\","
                        "\"cpuC\":%d,\"socC\":%d,\"socMax\":%d,\"socMaxId\":%d,\"socN\":%d,"
-                       "\"cpuMHz\":%ld,\"fanPct\":%d,\"socSensors\":[",
+                       "\"cpuMHz\":%ld,\"fanPct\":%d,",
                        h.fw, model, serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz,
                        h.fanPct);
+    // "power": per-rail readings, or null when the call is unavailable
+    if (h.powerOk)
+        json = text_append(json, &cap, &used,
+                           "\"power\":{\"mW\":[%u,%u],\"mV\":[%u,%u],\"mA\":[%u,%u]},",
+                           h.railmW[0], h.railmW[1], h.railmV[0], h.railmV[1], h.railmA[0],
+                           h.railmA[1]);
+    else
+        json = text_append(json, &cap, &used, "\"power\":null,");
+    json = text_append(json, &cap, &used, "\"socSensors\":[");
     for (int i = 0; json != NULL && i < h.socN; i++)
         json = text_append(json, &cap, &used, "%s{\"id\":%d,\"c\":%d}", i ? "," : "", h.socIds[i],
                            h.socVals[i]);

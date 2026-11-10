@@ -113,7 +113,7 @@ disable that first.
 | `rest` / `reboot` / `power-off` | rest mode, reboot, or power off |
 | `uninstall TITLE_ID` | uninstall a title |
 | `notify TYPE MESSAGE` | an on-screen message: `toast` (banner) or `flyout` (card) |
-| `hwinfo` | model, serial, CPU temp, all 64 SoC sensors (incl. the hottest), CPU clock, fan speed % |
+| `hwinfo` | model, serial, CPU temp, all 64 SoC sensors (incl. the hottest), CPU clock, fan speed %, SoC power (mW, total and per rail) |
 | `df` | free space per mounted volume |
 | `led BWA` / `off` / `auto` / `breathe B W A [MS]` / `chase [MS]` | the console indicator LED (static, off, system-controlled, or an animated effect), via `/dev/icc_indicator` |
 | `fan [TEMP]` | read the fan duty, or set the manual threshold (30..90 °C), via `/dev/icc_fan` |

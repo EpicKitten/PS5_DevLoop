@@ -172,6 +172,7 @@
   <span>SoC max <b id="pin-soc">—</b></span>
   <span>Fan <b id="pin-fan">—</b></span>
   <span>Clock <b id="pin-mhz">—</b></span>
+  <span>SoC power <b id="pin-pow">—</b></span>
 </div></div>
 <div class="wrap">
   <header>
@@ -274,6 +275,18 @@
       </span>
     </div>
     <div class="uchart" id="mhzchart"></div>
+  </div>
+
+  <div class="card chart-card">
+    <div class="chart-head">
+      <span class="label">SoC power history</span>
+      <span class="legend">
+        <span><i class="swatch" style="background:#f29e4e"></i>Total</span>
+        <span><i class="swatch" style="background:#7fd6a3"></i>Rail A</span>
+        <span><i class="swatch" style="background:#e07fd0"></i>Rail B</span>
+      </span>
+    </div>
+    <div class="uchart" id="powerchart"></div>
   </div>
   </div>
 
@@ -537,6 +550,10 @@ const T = [];                    // sample timestamps, unix seconds (the x axis)
 const CPU = [];                  // CPU temp per sample
 const FAN = [];                  // fan duty % per sample
 const MHZ = [];                  // CPU clock (MHz) per sample
+// SoC power per sample, in watts: the two supply rails the console reports and
+// their sum. PWV/PWI keep each rail's volts and amps for the tooltip.
+const PWT = [], PWA = [], PWB = [];
+const PWV = [[], []], PWI = [[], []];
 let socIds = [];                 // sensor ids, fixed on the first reading
 let SOC = [];                    // SOC[k] = history array for sensor socIds[k]
 const zone = t => t == null ? "var(--cool)" : t >= 75 ? "var(--hot)" : t >= 58 ? "var(--warm)" : "var(--cool)";
@@ -851,11 +868,29 @@ function buildClockChart() {
   makeChart("mhzchart", series, range, rows, () => [T, MHZ]);
 }
 
+function buildPowerChart() {
+  const line = (label, stroke, width, fill) =>
+    ({ label, stroke, width, fill, points: { show: false }, spanGaps: true });
+  const series = [{}, line("Total", "#f29e4e", 2, "rgba(242,158,78,.10)"),
+    line("Rail A", "#7fd6a3", 1.5), line("Rail B", "#e07fd0", 1.5)];
+  const w = v => v != null ? v.toFixed(1) + " W" : "—";
+  const rail = (k, idx) => PWV[k][idx] != null
+    ? ` <span style="color:var(--muted);font-weight:400">${PWV[k][idx].toFixed(2)} V · ${PWI[k][idx].toFixed(1)} A</span>` : "";
+  const rows = idx => `<div class="tt-t">${fmtClock(T[idx])}</div>` +
+    ttRow("#f29e4e", "Total", w(PWT[idx])) +
+    ttRow("#7fd6a3", "Rail A", w(PWA[idx]) + rail(0, idx)) +
+    ttRow("#e07fd0", "Rail B", w(PWB[idx]) + rail(1, idx));
+  // from zero, with headroom, so the height of the line means something
+  const range = (u, mn, mx) => mx == null ? [0, 50] : [0, Math.max(10, Math.ceil(mx * 1.15 / 5) * 5)];
+  makeChart("powerchart", series, range, rows, () => [T, PWT, PWA, PWB]);
+}
+
 function initCharts() {
   if (charts.length) return;             // build once, after the first reading
   buildTempChart();
   buildFanChart();
   buildClockChart();
+  buildPowerChart();
 }
 
 function pushCharts() {
@@ -890,6 +925,8 @@ function updatePinbar(d, socMax) {
   setPin("pin-soc", socMax, " °C" + (d.socMaxId != null && d.socMaxId >= 0 ? " #" + d.socMaxId : ""), zone(socMax));
   setPin("pin-fan", d.fanPct != null && d.fanPct >= 0 ? d.fanPct : null, " %");
   setPin("pin-mhz", d.cpuMHz, " MHz");
+  const p = d.power && Array.isArray(d.power.mW) ? (d.power.mW[0] + d.power.mW[1]) / 1000 : null;
+  setPin("pin-pow", p == null ? null : p.toFixed(1), " W");
 }
 // Pinned once the gauges have gone off the top of the window.
 function updatePinned() {
@@ -945,8 +982,18 @@ async function poll() {
     CPU.push(d.cpuC != null ? d.cpuC : null);
     FAN.push(d.fanPct != null && d.fanPct >= 0 ? d.fanPct : null);
     MHZ.push(d.cpuMHz != null && d.cpuMHz > 0 ? d.cpuMHz : null);
+    // power: null where the payload has no reading (an older payload, or the call failed)
+    const pw = d.power && Array.isArray(d.power.mW) ? d.power : null;
+    PWA.push(pw ? pw.mW[0] / 1000 : null);
+    PWB.push(pw ? pw.mW[1] / 1000 : null);
+    PWT.push(pw ? (pw.mW[0] + pw.mW[1]) / 1000 : null);
+    for (const k of [0, 1]) {
+      PWV[k].push(pw && pw.mV ? pw.mV[k] / 1000 : null);
+      PWI[k].push(pw && pw.mA ? pw.mA[k] / 1000 : null);
+    }
     socIds.forEach((id, k) => SOC[k].push(id in byId ? byId[id] : null));
-    while (T.length > MAX) { T.shift(); CPU.shift(); FAN.shift(); MHZ.shift(); SOC.forEach(a => a.shift()); }
+    while (T.length > MAX) { T.shift(); CPU.shift(); FAN.shift(); MHZ.shift();
+      PWT.shift(); PWA.shift(); PWB.shift(); PWV.forEach(a => a.shift()); PWI.forEach(a => a.shift()); SOC.forEach(a => a.shift()); }
     pushCharts();
     status(true, "connected · " + new Date().toLocaleTimeString());
   } catch (e) {
