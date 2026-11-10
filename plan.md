@@ -31,6 +31,7 @@ in this pass; **staged** = needs a resource or more work (noted per item).
 | `peek PID ADDR LEN` | `mdbg_copyout` (ps5/mdbg.h) | read a running process's memory |
 | `poke PID ADDR HEX` | `mdbg_copyin` | write a running process's memory |
 | `http URL` | raw socket HTTP/1.1 GET | let the payload fetch a URL (http://) |
+| `settings` | `sceRegMgrGetInt`/`GetStr` | read the system registry (settings) as JSON |
 
 `peek`/`poke` are the standout for game testing: read a title's state (score,
 health, level) and assert on it from the host, or set it. `ping` reports the
@@ -48,10 +49,12 @@ is the real use. Verify it against a running title with a known address.
   payload has no video context, so these cannot be shown from here — only the
   system-drawn notifications (`toast`, `flyout`) can. *Deferred: a dialog needs
   to run inside a title's render loop (or an injected context).*
-- **`setting get/set KEY [VALUE]`** — system settings via `sceRegMgrGetInt/SetInt/
-  GetStr/SetStr` (libSceRegMgr): resolution, HDR, language, rest timers. Reads
-  are safe; writes need an allowlist of known-safe keys so a bad key can't
-  misconfigure the console. *Deferred: needs the key allowlist.*
+- **Write a setting** — reading is done (`settings` dumps the registry as JSON);
+  writing with `sceRegMgrSetInt`/`SetStr` is held back until there is an
+  allowlist of known-safe regIds, so a bad key can't misconfigure the console.
+  The full enumeration (`sceRegMgrToolGetEntryCnt`) is refused to the payload
+  (`0x800d0218`), so `settings` scans regIds instead; a true dump-all would need
+  that tool privilege. *Deferred: the safe-key allowlist.*
 - **Live video / framebuffer** — continuous capture, not stills, to drop the
   capture-card dependency. libSceVideoOut / libSceAgc expose the display
   pipeline, but reading the *composited* output from a payload is the known hard

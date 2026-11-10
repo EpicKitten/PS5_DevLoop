@@ -16,7 +16,7 @@ ELF := $(OUTPUT)/ps5loop.elf
 
 CFLAGS := -std=c11 -O2 -g -Wall -Wextra -Werror
 LDLIBS := -lScePad -lSceUserService -lSceSystemService -lSceAppInstUtil -lSceNotification \
-          -lkernel_sys -lpthread
+          -lSceRegMgr -lkernel_sys -lpthread
 
 all: $(ELF)
 

@@ -51,6 +51,7 @@
  *   peek PID ADDR LEN         read a process's memory
  *   poke PID ADDR HEX         write a process's memory
  *   http http://URL           fetch a URL and send the response
+ *   settings                  read the system registry as JSON
  *   quit                      remove the pad and leave the console
  *
  * The pad is the system's own virtual device (libScePad's
@@ -1242,6 +1243,61 @@ static void open_url(int client, const char *url)
     reply(client, "%s open-url result=0x%08x %s", result == 0 ? "ok" : "err", (uint32_t)result, url);
 }
 
+// settings: read the system registry as JSON. There is no privileged "dump all"
+// call (the tool-enumeration interface answers 0x800d0218), but every value is
+// readable by its regId, which is (category << 24) | (sub << 16) | entry. Scan
+// that space: an int with sceRegMgrGetInt, else a string with sceRegMgrGetStr.
+// A (cat, sub) whose first entries are all empty is skipped, so the scan is
+// quick; the keys are the regIds in hex.
+int sceRegMgrGetInt(uint32_t reg_id, int *value);
+int sceRegMgrGetStr(uint32_t reg_id, char *value, size_t size);
+static void json_escape(char *out, size_t size, const char *in);
+
+static void settings_dump(int client)
+{
+    ensure_elevated();
+    size_t cap = 1u << 16, used = 0;
+    char *json = malloc(cap);
+    json = text_append(json, &cap, &used, "{");
+    bool first = true;
+    for (uint32_t cat = 0; cat <= 0xFF && json != NULL; cat++)
+        for (uint32_t sub = 0; sub <= 0xFF && json != NULL; sub++)
+        {
+            bool any = false;
+            for (uint32_t entry = 0; entry < 0x20 && json != NULL; entry++)
+            {
+                const uint32_t reg_id = (cat << 24) | (sub << 16) | entry;
+                int value = 0;
+                char text[400];
+                if (sceRegMgrGetInt(reg_id, &value) == 0)
+                {
+                    json = text_append(json, &cap, &used, "%s\n  \"0x%08x\": %d",
+                                       first ? "" : ",", reg_id, value);
+                    any = true;
+                    first = false;
+                }
+                else if (sceRegMgrGetStr(reg_id, text, sizeof(text)) == 0 && text[0] != '\0')
+                {
+                    char safe[820];
+                    json_escape(safe, sizeof(safe), text);
+                    json = text_append(json, &cap, &used, "%s\n  \"0x%08x\": \"%s\"",
+                                       first ? "" : ",", reg_id, safe);
+                    any = true;
+                    first = false;
+                }
+                else if (!any && entry >= 3)
+                    break; /* this (cat, sub) namespace looks empty */
+            }
+        }
+    if (json != NULL)
+        json = text_append(json, &cap, &used, "\n}\n");
+    if (json == NULL)
+        reply(client, "err settings: out of memory");
+    else
+        send_bytes(client, "settings", json, used);
+    free(json);
+}
+
 // Apps: launch a title by id, close a running app by its app id (from ps).
 int sceSystemServiceLaunchApp(const char *title_id, const char *argv[], void *param);
 int sceLncUtilKillApp(uint32_t app_id);
@@ -1796,6 +1852,11 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     if (strcmp(command, "hwinfo") == 0)
     {
         hwinfo(client);
+        return 0;
+    }
+    if (strcmp(command, "settings") == 0)
+    {
+        settings_dump(client);
         return 0;
     }
     if (strcmp(command, "df") == 0)

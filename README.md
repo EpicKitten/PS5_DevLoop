@@ -112,6 +112,7 @@ disable that first.
 | `kill PID` | end a process (not just a registered app) |
 | `peek PID ADDR LEN` / `poke PID ADDR HEX` | read / write a process's memory |
 | `http URL` | fetch an `http://` URL (saved under `downloads/`) |
+| `settings` | read the system registry (settings) as JSON |
 
 Verified on firmware 12.20: `ps`, `ls`/`get`/`put`/`rm`/`mv` (a round trip is
 byte-for-byte), `open-url`, `close-app`, `hwinfo`, `df`, `notify`, `peek`, and
@@ -125,6 +126,11 @@ byte-for-byte), `open-url`, `close-app`, `hwinfo`, `df`, `notify`, `peek`, and
   card. Both are drawn by the system, so they work from the payload. Modal
   dialogs (message, error, on-screen keyboard) are not here: they render into
   the calling app's own framebuffer, which a background payload does not have.
+- **`settings`** reads the registry by scanning regIds (`(cat << 24) | (sub <<
+  16) | entry`) with `sceRegMgrGetInt`/`GetStr`, keyed by regId in hex. It
+  covers the readable int and string values across every category; binary
+  entries and writing values are not included (a write needs a safe-key
+  allowlist — see `plan.md`).
 
 - **`launch`** uses `sceSystemServiceLaunchApp`, which takes titles registered in
   the shell's app database. Homebrew launched by a loader or a launcher (the
