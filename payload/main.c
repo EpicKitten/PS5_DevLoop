@@ -11,7 +11,9 @@
  * port 9112:
  *
  *   ping                      is the agent there, and what state the pad is in
- *   pad open [USERID]         create a virtual DualSense and give it to a user
+ *   pad open [USERID] [keep]  create a virtual DualSense, give it to a user, and
+ *                             (unless "keep") disconnect any real controller so
+ *                             that the virtual pad is the one titles read
  *   pad close                 remove it
  *   pad status                handle, device id, user, last insert result
  *   pad set B LX LY RX RY L2 R2   hold this state (B is a hex button mask)
@@ -49,8 +51,8 @@
  *
  * Which handle InsertData takes differs by firmware (the device id, its low
  * word, or a small index), so "pad open" tries each candidate with a neutral
- * sample and reports what every step returned. On firmware 13.60 it is the
- * device id (README.md, "What the console showed").
+ * sample and reports what every step returned. On firmware 12.20 and 13.60 it
+ * is the device id (README.md, "What the console showed").
  *
  * The screen comes from the console's own screenshot, which is what a person
  * holding Create gets: the whole composited picture, system UI included, in
@@ -407,6 +409,74 @@ static uint64_t klog_wait_device(int log, int wait_ms, char *report, size_t size
     return device_id;
 }
 
+// Disconnect every real controller the login manager lists, so that the virtual
+// pad becomes its user's first and titles read it. The login manager keeps a
+// controller table in the kernel log: a "[CIM]  Pad ..." header, then one
+// "[CIM] [n] 0x<device> 0x<user> ..." row per slot. A fresh reader of the log is
+// replayed the backlog, so opening the log here and taking the newest table
+// gives the current controllers. Reading it in the payload needs no klog server
+// on the host, so it works on a console that runs none (firmware 12.20).
+// Returns how many disconnects the service accepted.
+static int klog_evict_cim(uint64_t keep_device, char *report, size_t size)
+{
+    const int log = klog_open();
+    if (log < 0)
+    {
+        note(report, size, "evict=noklog");
+        return 0;
+    }
+    const size_t cap = 1u << 17;
+    char *const buffer = malloc(cap);
+    size_t used = 0;
+    const uint64_t deadline = monotonic_us() + 800000u;
+    while (buffer != NULL && used + 1 < cap && monotonic_us() < deadline)
+    {
+        const ssize_t bytes = klog_read(log, buffer + used, cap - 1 - used, 100);
+        if (bytes < 0)
+            break;
+        used += (size_t)bytes;
+    }
+    close(log);
+    if (buffer == NULL)
+    {
+        note(report, size, "evict=nomem");
+        return 0;
+    }
+    buffer[used] = '\0';
+    // The last table printed is the current one.
+    char *table = buffer;
+    for (char *at = buffer; (at = strstr(at, "[CIM]  Pad")) != NULL; at++)
+        table = at;
+    int evicted = 0, listed = 0;
+    for (char *line = table; line != NULL && *line != '\0';)
+    {
+        char *const end = strchr(line, '\n');
+        if (end != NULL)
+            *end = '\0';
+        // A slot row reads "[CIM] [<n>] 0x<device> ..."; the header ("[CIM]  Pad")
+        // and other "[CIM]" lines do not match this shape and are skipped.
+        const char *const row = strstr(line, "[CIM] [");
+        if (row != NULL && row[7] >= '0' && row[7] <= '9' && listed < 8)
+        {
+            const char *const hex = strstr(row, "0x");
+            const uint64_t device = hex != NULL ? strtoull(hex + 2, NULL, 16) : 0;
+            if (device != 0 && device != keep_device && device != 0xffffffffffffffffull)
+            {
+                listed++;
+                const int32_t result = mbus_disconnect != NULL ? mbus_disconnect(device) : -1;
+                log_line("ps5loop: evict 0x%llx -> 0x%08x", (unsigned long long)device,
+                         (uint32_t)result);
+                if (result == 0)
+                    evicted++;
+            }
+        }
+        line = end != NULL ? end + 1 : NULL;
+    }
+    free(buffer);
+    note(report, size, "evicted=%d/%d", evicted, listed);
+    return evicted;
+}
+
 // Load libSceMbus, raise this process to the credentials the pad service
 // accepts, and initialise the service. Once per process.
 static int pad_libraries(char *report, size_t size)
@@ -470,7 +540,7 @@ static int32_t pad_find_handle(int32_t added, const add_device_param_t *param, u
 
 // Create the virtual pad and give it to a user. Returns 0 when samples reach
 // it; the report says what every step returned either way.
-static int pad_open(int32_t user_id, char *report, size_t size)
+static int pad_open(int32_t user_id, bool evict, char *report, size_t size)
 {
     if (g_pad.open)
     {
@@ -507,13 +577,14 @@ static int pad_open(int32_t user_id, char *report, size_t size)
 
     uint64_t device_id = 0;
     if (log >= 0)
-    {
         device_id = klog_wait_device(log, 3000, report, size);
-        close(log);
-    }
     note(report, size, "device=0x%llx", (unsigned long long)device_id);
     if (added != 0 && (uint32_t)added != PS5LOOP_ASSIGNMENT_PENDING && device_id == 0)
+    {
+        if (log >= 0)
+            close(log);
         return -1;
+    }
 
     // Without this the console shows "Who's using this controller?" and waits
     // for a person: binding is what choosing a profile there does.
@@ -521,6 +592,17 @@ static int pad_open(int32_t user_id, char *report, size_t size)
         note(report, size, "bind=0x%08x", (uint32_t)mbus_bind(device_id, user_id));
     else
         note(report, size, "bind=skipped");
+
+    if (log >= 0)
+        close(log);
+
+    // A title reads its user's first controller; while a real one holds that
+    // place the virtual pad is the second and no title opens it. Read the login
+    // manager's controller table from the kernel log and disconnect the others,
+    // so the virtual pad is first. (PS on a real pad brings it back.) --beside
+    // keeps them, for the home screen.
+    if (evict && mbus_disconnect != NULL)
+        klog_evict_cim(device_id, report, size);
 
     const int32_t handle = pad_find_handle(added, &param, device_id, report, size);
     if (handle < 0)
@@ -924,6 +1006,44 @@ static int handle_command(int client, char *line)
             reply(client, "ok forget result=0x%08x %s", (uint32_t)capture_delete(path), path);
         return 0;
     }
+    if (strcmp(command, "klog") == 0)
+    {
+        // bring-up: dump the kernel log for a while, so another firmware's device
+        // and controller lines can be read from the host (the format the device
+        // id and the controller table are recovered from differs by firmware).
+        const char *const ms = strtok(NULL, " \t");
+        int wait_ms = ms != NULL ? atoi(ms) : 1500;
+        if (wait_ms < 1 || wait_ms > 15000)
+            wait_ms = 1500;
+        const int log = klog_open();
+        if (log < 0)
+        {
+            reply(client, "err klog: %s", strerror(errno));
+            return 0;
+        }
+        const size_t cap = 1u << 20;
+        char *const buffer = malloc(cap);
+        size_t used = 0;
+        const uint64_t deadline = monotonic_us() + (uint64_t)wait_ms * 1000u;
+        while (buffer != NULL && used + 1 < cap && monotonic_us() < deadline)
+        {
+            const ssize_t bytes = klog_read(log, buffer + used, cap - 1 - used, 100);
+            if (bytes < 0)
+                break;
+            used += (size_t)bytes;
+        }
+        close(log);
+        reply(client, "ok file size=%zu mtime=0 path=klog", used);
+        for (size_t sent = 0; buffer != NULL && sent < used;)
+        {
+            const ssize_t step = send(client, buffer + sent, used - sent, 0);
+            if (step <= 0)
+                break;
+            sent += (size_t)step;
+        }
+        free(buffer);
+        return 0;
+    }
     if (strcmp(command, "capture") == 0)
     {
         // bring-up: the screenshot service alone, with its type argument
@@ -962,8 +1082,12 @@ static int handle_command(int client, char *line)
     }
     if (strcmp(action, "open") == 0)
     {
-        const int32_t user = count > 0 ? (int32_t)strtoul(arguments[0], NULL, 0) : -1;
-        const int status = pad_open(user, report, sizeof(report));
+        // "pad open [USER] [keep]": keep leaves real controllers connected.
+        const bool keep = (count > 0 && strcmp(arguments[0], "keep") == 0) ||
+                          (count > 1 && strcmp(arguments[1], "keep") == 0);
+        const int32_t user =
+            (count > 0 && strcmp(arguments[0], "keep") != 0) ? (int32_t)strtoul(arguments[0], NULL, 0) : -1;
+        const int status = pad_open(user, !keep, report, sizeof(report));
         reply(client, "%s pad %s%s", status == 0 ? "ok" : "err", status == 0 ? "open " : "", report);
         return 0;
     }

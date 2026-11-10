@@ -24,6 +24,8 @@ Commands:
                         titles.json): about 1 s. Use it whenever a title runs
   latest [FILE]         fetch the newest capture without pressing anything
   shots                 list the console's newest captures
+  klog [MS] [FILE]      dump the console's kernel log: bring-up, for reading the
+                        device and controller lines a new firmware prints
 
 The console's address comes from PS5_HOST in the environment, then from .env in
 this project (.env.example). It is never printed.
@@ -40,7 +42,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PORT = int(os.environ.get("PS5LOOP_PORT", "9112"))
-KLOG_PORT = int(os.environ.get("KLOG_PORT", "3232"))
 LOADER_PORT = int(os.environ.get("PS5_LOADER_PORT", "9021"))
 # What a picture is scaled down to, so that it can be looked at cheaply.
 VIEW_WIDTH = 1280
@@ -110,72 +111,24 @@ def command(line, timeout=30.0, payload=False):
         return answer, rest[:size]
 
 
-def klog_listen():
-    """A connection to the console's klog, or None. Opened before the pad, so
-    that what the console logs as the pad arrives is not missed."""
-    try:
-        return socket.create_connection((console_host(), KLOG_PORT), timeout=5)
-    except OSError:
-        return None
-
-
-def other_pads(connection, device, seconds=2.5):
-    """The other controllers the console lists, from the table its klog prints
-    when a controller changes owner: "[CIM] [0] 0x<device> 0x<user> ..."."""
-    found = set()
-    if connection is None:
-        return None
-    with connection:
-        connection.settimeout(0.5)
-        data = b""
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            try:
-                chunk = connection.recv(65536)
-            except socket.timeout:
-                continue
-            if not chunk:
-                break
-            data += chunk
-    # The last table is the current one.
-    table = data.decode("utf-8", "replace").rsplit("[CIM]  Pad", 1)
-    if len(table) < 2:
-        return None
-    for line in table[1].splitlines():
-        words = line.split()
-        if len(words) >= 4 and words[0].endswith("[CIM]") and words[2].startswith("0x"):
-            pad = int(words[2], 16)
-            if pad not in (device, 0xffffffffffffffff):
-                found.add(pad)
-    return found
-
-
 def open_pad(args):
-    """Create the pad, close the console's prompt, and make the pad its user's first."""
-    klog = None if args.beside else klog_listen()
-    answer, _ = command(f"pad open {args.user}".strip())
+    """Create the pad, close the console's prompt, and (unless --beside) make the
+    pad its user's first by disconnecting any real controller. The eviction runs
+    in the payload, off the console's own kernel log, so it needs no klog server."""
+    line = "pad open"
+    if args.user:
+        line += f" {args.user}"
+    if args.beside:
+        line += " keep"
+    answer, _ = command(line)
     if not answer.startswith("ok") or "already open" in answer:
         return say(answer)
     print(answer)
-    device = int(answer.split("device=")[1].split()[0], 16)
     if not args.keep_prompt:
         # The console asks who the new controller belongs to although it is bound
         # already; Circle, from the pad itself, closes the question.
         time.sleep(1.5)
         command(f"pad tap {BUTTONS['circle']:x} 80")
-    if args.beside:
-        return 0
-    # A title reads its user's first controller, so a real one that is connected
-    # has to go: PS on it brings it back.
-    pads = other_pads(klog, device)
-    if pads is None:
-        print("klog did not list the controllers: if a real one is connected, titles "
-              "read it and not this pad (pad evict DEVICE)")
-        return 0
-    for pad in sorted(pads):
-        print(command(f"pad evict {pad:x}")[0])
-    if not pads:
-        print("ok no other controller is connected")
     return 0
 
 
@@ -311,6 +264,9 @@ def main():
                           help="a title from titles.json")
     commands.add_parser("latest").add_argument("file", nargs="?")
     commands.add_parser("shots")
+    klogging = commands.add_parser("klog")
+    klogging.add_argument("ms", nargs="?", default="1500", help="how long to read, in ms")
+    klogging.add_argument("file", nargs="?")
     args = parser.parse_args()
 
     if args.command == "load":
@@ -329,6 +285,15 @@ def main():
         return status
     if args.command == "latest":
         return fetch("latest", args)
+    if args.command == "klog":
+        answer, data = command(f"klog {args.ms}", timeout=60, payload=True)
+        if not answer.startswith("ok file"):
+            return say(answer)
+        out = Path(args.file) if args.file else ROOT / "captures" / time.strftime("klog-%Y%m%d-%H%M%S.txt")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        print(f"ok klog {len(data)} bytes -> {out}")
+        return 0
     if args.command == "press":
         return say(command(f"pad tap {mask(args.buttons):x} {args.ms}")[0])
     if args.command == "hold":

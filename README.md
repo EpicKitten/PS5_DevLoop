@@ -38,9 +38,9 @@ port, go through its menus, quit through "Exit game?", and land back on the
 home screen, every step checked from a picture.
 
 > For homebrew development on a console you own. It is tested on **firmware
-> 13.60 only**; the calls it relies on are undocumented and may differ elsewhere.
-> `payload/main.c` reports what every step returned so that another firmware can
-> be brought up.
+> 12.20 and 13.60**; the calls it relies on are undocumented and may differ
+> elsewhere. `payload/main.c` reports what every step returned, and `ps5loop.py
+> klog` dumps the kernel log, so that another firmware can be brought up.
 
 ## For agents
 
@@ -51,8 +51,11 @@ folder. Point any other agent at it first.
 
 ## What you need
 
-- A jailbroken PS5 on your network, with an **ELF loader** (port 9021) and a
-  **klog server** (port 3232) running, as the usual payload chains provide.
+- A jailbroken PS5 on your network, with an **ELF loader** (port 9021) running,
+  as the usual payload chains provide. A **klog server** (port 3232) is used if
+  one is running; without it the payload reads `/dev/klog` directly, so neither
+  the pad's device id nor controller eviction depends on it (firmware 12.20
+  runs none).
 - Python 3 on the host, and for pictures `JxrDecApp` (jxrlib) and `magick`
   (ImageMagick): `brew install jxrlib imagemagick`, or your distribution's
   packages.
@@ -76,6 +79,7 @@ tools. The pad can launch anything from the home screen without them.
 | `seq STEPS...` | presses and waits in order: `down cross:300 wait:1000` |
 | `grab [FILE]` | the running title's frame (`--title`, from `titles.json`) |
 | `shot [FILE]` | the whole screen, through the console's screenshot |
+| `klog [MS] [FILE]` | dump the console's kernel log (a bring-up aid) |
 | `close` | remove the pad |
 
 `tools/ps5loop.py --help` lists the rest; `payload/main.c` documents the wire
@@ -98,7 +102,9 @@ protocol (one text command per connection, port 9112).
   does: the file, its thumbnail and its row in the media database all go. The
   client decodes it (JPEG XR when HDR is on) and scales it to 1280 wide.
 
-## What the console showed (firmware 13.60)
+## What the console showed
+
+Measured live. Firmware 12.20 and 13.60 behave the same unless noted.
 
 - `AddDevice` for the real user answers `0x803b0001` and creates nothing. For
   user 1 it answers `0x803b0006` and the device appears in klog
@@ -111,15 +117,22 @@ protocol (one text command per connection, port 9112).
 - A title opens its user's first controller (`scePadOpen(user, 0, 0)`). With a
   real DualSense connected the virtual pad is the second and the title never
   reads it. `sceMbusDisconnectDevice` on the real one leaves the virtual pad
-  first, and a title already running picks it up at once. `open` finds the real
-  pad in klog's `[CIM]` table and disconnects it; PS on the real pad reconnects
-  it.
+  first, and a title already running picks it up at once. The payload reads the
+  login manager's `[CIM]` controller table from the kernel log (a fresh reader
+  is replayed the backlog) and disconnects the real pad itself, so `open` needs
+  no klog server; PS on the real pad reconnects it.
 - Confirmed by picture, on the home screen and in a title's menus: Cross,
-  Circle, the d-pad, L1, Create. Not yet exercised: sticks, triggers, PS,
+  Circle, the d-pad, L1, Create, PS. Not yet exercised: sticks, triggers,
   Options, the touchpad.
 - `sceScreenShotCapture` (libSceScreenShot), called from the payload, answers
   "busy" until it is cancelled, with either type: no way round the Create hold
   was found.
+- **Firmware 12.20**: the pad path above is identical, confirmed live (`add`
+  `0x803b0006`, device id = `InsertData` handle, `bind` 0, input driving a
+  homebrew launcher once the real pad is evicted). This console runs no klog
+  server, so the payload reads `/dev/klog`; `shot`'s Create hold and its
+  `sceContentDeleteByPath` cleanup both work. Use `ps5loop.py klog` to read the
+  log on a console whose server is absent.
 
 ## Limits
 
@@ -129,8 +142,10 @@ protocol (one text command per connection, port 9112).
   instead.
 - While the pad drives a title, the real controller is disconnected
   (`open --beside` keeps it, for the home screen only).
-- The pad's device id is read from the klog server while it opens: another klog
-  client connecting at that moment can make `open` miss it.
+- The pad's device id, and the controller table `open` evicts from, are read
+  from the console's kernel log (its klog server if one runs, else `/dev/klog`).
+  Another reader holding `/dev/klog`, or a client connecting to the server at
+  that moment, can make `open` miss them.
 - The payload listens on the local network with no authentication. Run it on a
   network you trust.
 
