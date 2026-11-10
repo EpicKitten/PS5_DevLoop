@@ -18,12 +18,16 @@ Commands:
   release               let everything go
   seq STEPS...          steps in order: a button press ("down", "cross:300" for
                         300 ms), or "wait:500"
-  shot [FILE]           the whole screen, system UI included, through the console's
+  screenshot [FILE]     the whole screen, system UI included, through the console's
                         own screenshot: about 3 s. For the home screen and dialogs
-  grab [FILE]           ask the running title for its frame (--title, from
+  frame [FILE]          ask the running title for its own frame (--title, from
                         titles.json): about 1 s. Use it whenever a title runs
-  latest [FILE]         fetch the newest capture without pressing anything
-  shots                 list the console's newest captures
+  latest-capture [FILE] fetch the newest capture without pressing anything
+  list-captures         list the console's newest captures
+  delete-capture PATH   delete a leftover capture as the gallery does
+  kernel-log [MS] [FILE] dump the console's kernel log: bring-up, for reading the
+                        device and controller lines a new firmware prints
+  doctor                check the host, payload, loader and capture tools
 
 The console's address comes from PS5_HOST in the environment, then from .env in
 this project (.env.example). It is never printed.
@@ -40,7 +44,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 PORT = int(os.environ.get("PS5LOOP_PORT", "9112"))
-KLOG_PORT = int(os.environ.get("KLOG_PORT", "3232"))
 LOADER_PORT = int(os.environ.get("PS5_LOADER_PORT", "9021"))
 # What a picture is scaled down to, so that it can be looked at cheaply.
 VIEW_WIDTH = 1280
@@ -49,8 +52,8 @@ VIEW_WIDTH = 1280
 # "Giving a title grab"): the file the title looks for, and the folder it writes
 # the picture into.
 TITLES = json.loads((ROOT / "titles.json").read_text(encoding="utf-8"))
-NO_HOOK = ("the title did not answer: is it running, and does it have the grab hook? "
-           "(AGENTS.md, \"Giving a title grab\"); shot takes the whole screen meanwhile")
+NO_HOOK = ("the title did not answer: is it running, and does it have the frame hook? "
+           "(AGENTS.md, \"Giving a title a frame\"); screenshot takes the whole screen meanwhile")
 
 BUTTONS = {
     "create": 0x1, "l3": 0x2, "r3": 0x4, "options": 0x8,
@@ -110,72 +113,24 @@ def command(line, timeout=30.0, payload=False):
         return answer, rest[:size]
 
 
-def klog_listen():
-    """A connection to the console's klog, or None. Opened before the pad, so
-    that what the console logs as the pad arrives is not missed."""
-    try:
-        return socket.create_connection((console_host(), KLOG_PORT), timeout=5)
-    except OSError:
-        return None
-
-
-def other_pads(connection, device, seconds=2.5):
-    """The other controllers the console lists, from the table its klog prints
-    when a controller changes owner: "[CIM] [0] 0x<device> 0x<user> ..."."""
-    found = set()
-    if connection is None:
-        return None
-    with connection:
-        connection.settimeout(0.5)
-        data = b""
-        deadline = time.monotonic() + seconds
-        while time.monotonic() < deadline:
-            try:
-                chunk = connection.recv(65536)
-            except socket.timeout:
-                continue
-            if not chunk:
-                break
-            data += chunk
-    # The last table is the current one.
-    table = data.decode("utf-8", "replace").rsplit("[CIM]  Pad", 1)
-    if len(table) < 2:
-        return None
-    for line in table[1].splitlines():
-        words = line.split()
-        if len(words) >= 4 and words[0].endswith("[CIM]") and words[2].startswith("0x"):
-            pad = int(words[2], 16)
-            if pad not in (device, 0xffffffffffffffff):
-                found.add(pad)
-    return found
-
-
 def open_pad(args):
-    """Create the pad, close the console's prompt, and make the pad its user's first."""
-    klog = None if args.beside else klog_listen()
-    answer, _ = command(f"pad open {args.user}".strip())
+    """Create the pad, close the console's prompt, and (unless --beside) make the
+    pad its user's first by disconnecting any real controller. The eviction runs
+    in the payload, off the console's own kernel log, so it needs no klog server."""
+    line = "pad open"
+    if args.user:
+        line += f" {args.user}"
+    if args.beside:
+        line += " keep"
+    answer, _ = command(line)
     if not answer.startswith("ok") or "already open" in answer:
         return say(answer)
     print(answer)
-    device = int(answer.split("device=")[1].split()[0], 16)
     if not args.keep_prompt:
         # The console asks who the new controller belongs to although it is bound
         # already; Circle, from the pad itself, closes the question.
         time.sleep(1.5)
         command(f"pad tap {BUTTONS['circle']:x} 80")
-    if args.beside:
-        return 0
-    # A title reads its user's first controller, so a real one that is connected
-    # has to go: PS on it brings it back.
-    pads = other_pads(klog, device)
-    if pads is None:
-        print("klog did not list the controllers: if a real one is connected, titles "
-              "read it and not this pad (pad evict DEVICE)")
-        return 0
-    for pad in sorted(pads):
-        print(command(f"pad evict {pad:x}")[0])
-    if not pads:
-        print("ok no other controller is connected")
     return 0
 
 
@@ -211,6 +166,15 @@ def load(args):
     raise SystemExit("ps5loop: loaded, but the payload does not answer; read klog")
 
 
+def run_tool(command):
+    """Run a decode or convert helper. Returns the result, or None when the tool
+    is not installed, so a capture is kept raw instead of crashing the client."""
+    try:
+        return subprocess.run(command, capture_output=True, text=True, check=False)
+    except FileNotFoundError:
+        return None
+
+
 def to_png(data, target):
     """Write a capture as a PNG to look at, whatever the console saved it as."""
     target = Path(target)
@@ -224,12 +188,15 @@ def to_png(data, target):
         # screen's 10-bit pictures as a packed TIFF that nothing reads back
         # correctly. A title's 8-bit pictures refuse that conversion and decode
         # as they are.
+        decoded = None
         for conversion in (["-c", "9"], []):
             tiff.unlink(missing_ok=True)
-            decoded = subprocess.run(["JxrDecApp", "-i", str(raw), "-o", str(tiff), *conversion],
-                                     capture_output=True, text=True, check=False)
-            if decoded.returncode == 0 and tiff.is_file():
+            decoded = run_tool(["JxrDecApp", "-i", str(raw), "-o", str(tiff), *conversion])
+            if decoded is None or (decoded.returncode == 0 and tiff.is_file()):
                 break
+        if decoded is None:
+            print(f"kept {raw}: install jxrlib (JxrDecApp) to decode the console's HDR captures")
+            return raw
         if decoded.returncode != 0 or not tiff.is_file():
             print(f"kept {raw}: JxrDecApp could not decode it ({decoded.stdout.strip()[-200:]})")
             return raw
@@ -241,9 +208,11 @@ def to_png(data, target):
         source.write_bytes(data)
     # Only the console's HDR pictures need their levels stretched to be readable.
     levels = ["-auto-level"] if source.suffix == ".tif" else []
-    scaled = subprocess.run(["magick", str(source), *levels, "-resize", f"{VIEW_WIDTH}x>",
-                             "-depth", "8", str(target)],
-                            capture_output=True, text=True, check=False)
+    scaled = run_tool(["magick", str(source), *levels, "-resize", f"{VIEW_WIDTH}x>",
+                       "-depth", "8", str(target)])
+    if scaled is None:
+        print(f"kept {source}: install ImageMagick (magick) to scale captures for viewing")
+        return source
     if scaled.returncode != 0:
         print(f"kept {source}: magick could not convert it ({scaled.stderr.strip()[-200:]})")
         return source
@@ -256,7 +225,7 @@ def fetch(line, args):
     answer, data = command(line, timeout=60, payload=True)
     if not answer.startswith("ok file"):
         return say(answer)
-    name = args.file or ROOT / "captures" / time.strftime("shot-%Y%m%d-%H%M%S.png")
+    name = args.file or ROOT / "captures" / time.strftime("capture-%Y%m%d-%H%M%S.png")
     print(f"{answer.split(' path=')[0]} -> {to_png(data, name)}")
     return 0
 
@@ -273,6 +242,40 @@ def sequence(args):
         time.sleep(args.gap / 1000)
     print(f"ok {len(args.steps)} steps")
     return 0
+
+
+def doctor():
+    """Check the setup without pressing anything: the host, the payload and its
+    loader, and the host tools captures need to decode. One line each, ok or --."""
+    import shutil
+    ok = True
+    try:
+        host = console_host()
+    except SystemExit as error:
+        print(error)
+        return 1
+    print("ok host set")
+    try:
+        answer, _ = command("ping", timeout=5)
+        print(f"ok payload {answer}")
+    except SystemExit as error:
+        print(f"-- payload unreachable ({error}); run: ps5loop.py load")
+        ok = False
+    try:
+        with socket.create_connection((host, LOADER_PORT), timeout=3):
+            print(f"ok loader port {LOADER_PORT} open")
+    except OSError:
+        print(f"-- loader port {LOADER_PORT} closed (load needs it)")
+        ok = False
+    for tool, package in (("JxrDecApp", "jxrlib"), ("magick", "ImageMagick")):
+        if shutil.which(tool):
+            print(f"ok {tool} found")
+        else:
+            print(f"-- {tool} missing: install {package} to decode captures "
+                  "(raw files are still saved)")
+            ok = False
+    print("ok doctor: ready" if ok else "-- doctor: see the lines above")
+    return 0 if ok else 1
 
 
 def main():
@@ -302,15 +305,21 @@ def main():
     steps.add_argument("steps", nargs="+")
     steps.add_argument("--ms", type=int, default=80, help="how long each press is held")
     steps.add_argument("--gap", type=int, default=250, help="the pause after each press")
-    shot = commands.add_parser("shot")
-    shot.add_argument("file", nargs="?")
-    shot.add_argument("--hold", type=int, default=0, help="how long Create is held, in ms")
-    grabbing = commands.add_parser("grab")
-    grabbing.add_argument("file", nargs="?")
-    grabbing.add_argument("--title", default=next(iter(TITLES)), choices=sorted(TITLES),
-                          help="a title from titles.json")
-    commands.add_parser("latest").add_argument("file", nargs="?")
-    commands.add_parser("shots")
+    screenshot = commands.add_parser("screenshot")
+    screenshot.add_argument("file", nargs="?")
+    screenshot.add_argument("--hold", type=int, default=0, help="how long Create is held, in ms")
+    framing = commands.add_parser("frame")
+    framing.add_argument("file", nargs="?")
+    framing.add_argument("--title", default=next(iter(TITLES)), choices=sorted(TITLES),
+                         help="a title from titles.json")
+    commands.add_parser("latest-capture").add_argument("file", nargs="?")
+    commands.add_parser("list-captures")
+    kernel_log = commands.add_parser("kernel-log")
+    kernel_log.add_argument("ms", nargs="?", default="1500", help="how long to read, in ms")
+    kernel_log.add_argument("file", nargs="?")
+    commands.add_parser("delete-capture").add_argument("path",
+                                                       help="a capture under /user/av_contents/")
+    commands.add_parser("doctor")
     args = parser.parse_args()
 
     if args.command == "load":
@@ -319,16 +328,29 @@ def main():
         return open_pad(args)
     if args.command == "seq":
         return sequence(args)
-    if args.command == "shot":
-        return fetch(f"shot {args.hold}" if args.hold else "shot", args)
-    if args.command == "grab":
+    if args.command == "screenshot":
+        return fetch(f"screenshot {args.hold}" if args.hold else "screenshot", args)
+    if args.command == "frame":
         title = TITLES[args.title]
-        status = fetch(f"grab {title['request']} {title['folder']}", args)
+        status = fetch(f"frame {title['request']} {title['folder']}", args)
         if status != 0:
             print(NO_HOOK)
         return status
-    if args.command == "latest":
-        return fetch("latest", args)
+    if args.command == "latest-capture":
+        return fetch("latest-capture", args)
+    if args.command == "kernel-log":
+        answer, data = command(f"kernel-log {args.ms}", timeout=60, payload=True)
+        if not answer.startswith("ok file"):
+            return say(answer)
+        out = Path(args.file) if args.file else ROOT / "captures" / time.strftime("klog-%Y%m%d-%H%M%S.txt")
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_bytes(data)
+        print(f"ok kernel-log {len(data)} bytes -> {out}")
+        return 0
+    if args.command == "delete-capture":
+        return say(command(f"delete-capture {args.path}")[0])
+    if args.command == "doctor":
+        return doctor()
     if args.command == "press":
         return say(command(f"pad tap {mask(args.buttons):x} {args.ms}")[0])
     if args.command == "hold":
@@ -337,8 +359,8 @@ def main():
                            f"{args.l2} {args.r2}")[0])
     if args.command == "release":
         return say(command("pad set 0 128 128 128 128 0 0")[0])
-    line = {"ping": "ping", "shots": "shots", "status": "pad status", "close": "pad close",
-            "raw": " ".join(getattr(args, "words", []))}[args.command]
+    line = {"ping": "ping", "list-captures": "list-captures", "status": "pad status",
+            "close": "pad close", "raw": " ".join(getattr(args, "words", []))}[args.command]
     return say(command(line)[0])
 
 

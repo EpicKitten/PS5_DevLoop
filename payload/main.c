@@ -11,7 +11,9 @@
  * port 9112:
  *
  *   ping                      is the agent there, and what state the pad is in
- *   pad open [USERID]         create a virtual DualSense and give it to a user
+ *   pad open [USERID] [keep]  create a virtual DualSense, give it to a user, and
+ *                             (unless "keep") disconnect any real controller so
+ *                             that the virtual pad is the one titles read
  *   pad close                 remove it
  *   pad status                handle, device id, user, last insert result
  *   pad set B LX LY RX RY L2 R2   hold this state (B is a hex button mask)
@@ -20,15 +22,16 @@
  *   pad bind DEVICE [USERID]  bring-up: bind a device id to a user by hand
  *   pad evict DEVICE          disconnect another controller, so that the
  *                             virtual pad is its user's first, the one titles read
- *   shots                     the newest files under the console's captures
- *   latest                    send the newest capture: a header line, then bytes
- *   shot [HOLD_MS]            hold Create (the console's "take screenshot"
+ *   list-captures             the newest files under the console's captures
+ *   latest-capture            send the newest capture: a header line, then bytes
+ *   screenshot [HOLD_MS]      hold Create (the console's "take screenshot"
  *                             shortcut), wait for the new file, send it, and
  *                             delete it from the console's gallery
- *   forget PATH               delete a capture as the gallery does
- *   capture [TYPE]            bring-up: ask the screenshot service directly
- *                             (it never answers a payload on firmware 13.60)
- *   grab REQUEST FOLDER [MS]  ask a running title for its frame: create the
+ *   delete-capture PATH       delete a capture as the gallery does
+ *   kernel-log [MS]           dump the kernel log for a while (bring-up)
+ *   direct-screenshot [TYPE]  bring-up: ask the screenshot service directly
+ *                             (it answers no payload on firmware 12.20 or 13.60)
+ *   frame REQUEST FOLDER [MS] ask a running title for its frame: create the
  *                             file REQUEST, which the title takes as "write a
  *                             picture into FOLDER", send the picture, delete it
  *   quit                      remove the pad and leave the console
@@ -49,8 +52,8 @@
  *
  * Which handle InsertData takes differs by firmware (the device id, its low
  * word, or a small index), so "pad open" tries each candidate with a neutral
- * sample and reports what every step returned. On firmware 13.60 it is the
- * device id (README.md, "What the console showed").
+ * sample and reports what every step returned. On firmware 12.20 and 13.60 it
+ * is the device id (README.md, "What the console showed").
  *
  * The screen comes from the console's own screenshot, which is what a person
  * holding Create gets: the whole composited picture, system UI included, in
@@ -58,7 +61,7 @@
  * console wants Create held. The picture is then deleted through
  * libSceContentDelete, which removes it as the gallery's own Delete does.
  *
- * A title that can write its own frame is asked instead ("grab"): it is quicker
+ * A title that can write its own frame is asked instead ("frame"): it is quicker
  * by an order of magnitude and leaves nothing behind, but shows only what the
  * title drew. The title's side is a file it looks for and removes
  * (AGENTS.md, "Giving a title grab").
@@ -407,6 +410,74 @@ static uint64_t klog_wait_device(int log, int wait_ms, char *report, size_t size
     return device_id;
 }
 
+// Disconnect every real controller the login manager lists, so that the virtual
+// pad becomes its user's first and titles read it. The login manager keeps a
+// controller table in the kernel log: a "[CIM]  Pad ..." header, then one
+// "[CIM] [n] 0x<device> 0x<user> ..." row per slot. A fresh reader of the log is
+// replayed the backlog, so opening the log here and taking the newest table
+// gives the current controllers. Reading it in the payload needs no klog server
+// on the host, so it works on a console that runs none (firmware 12.20).
+// Returns how many disconnects the service accepted.
+static int klog_evict_cim(uint64_t keep_device, char *report, size_t size)
+{
+    const int log = klog_open();
+    if (log < 0)
+    {
+        note(report, size, "evict=noklog");
+        return 0;
+    }
+    const size_t cap = 1u << 17;
+    char *const buffer = malloc(cap);
+    size_t used = 0;
+    const uint64_t deadline = monotonic_us() + 800000u;
+    while (buffer != NULL && used + 1 < cap && monotonic_us() < deadline)
+    {
+        const ssize_t bytes = klog_read(log, buffer + used, cap - 1 - used, 100);
+        if (bytes < 0)
+            break;
+        used += (size_t)bytes;
+    }
+    close(log);
+    if (buffer == NULL)
+    {
+        note(report, size, "evict=nomem");
+        return 0;
+    }
+    buffer[used] = '\0';
+    // The last table printed is the current one.
+    char *table = buffer;
+    for (char *at = buffer; (at = strstr(at, "[CIM]  Pad")) != NULL; at++)
+        table = at;
+    int evicted = 0, listed = 0;
+    for (char *line = table; line != NULL && *line != '\0';)
+    {
+        char *const end = strchr(line, '\n');
+        if (end != NULL)
+            *end = '\0';
+        // A slot row reads "[CIM] [<n>] 0x<device> ..."; the header ("[CIM]  Pad")
+        // and other "[CIM]" lines do not match this shape and are skipped.
+        const char *const row = strstr(line, "[CIM] [");
+        if (row != NULL && row[7] >= '0' && row[7] <= '9' && listed < 8)
+        {
+            const char *const hex = strstr(row, "0x");
+            const uint64_t device = hex != NULL ? strtoull(hex + 2, NULL, 16) : 0;
+            if (device != 0 && device != keep_device && device != 0xffffffffffffffffull)
+            {
+                listed++;
+                const int32_t result = mbus_disconnect != NULL ? mbus_disconnect(device) : -1;
+                log_line("ps5loop: evict 0x%llx -> 0x%08x", (unsigned long long)device,
+                         (uint32_t)result);
+                if (result == 0)
+                    evicted++;
+            }
+        }
+        line = end != NULL ? end + 1 : NULL;
+    }
+    free(buffer);
+    note(report, size, "evicted=%d/%d", evicted, listed);
+    return evicted;
+}
+
 // Load libSceMbus, raise this process to the credentials the pad service
 // accepts, and initialise the service. Once per process.
 static int pad_libraries(char *report, size_t size)
@@ -470,7 +541,7 @@ static int32_t pad_find_handle(int32_t added, const add_device_param_t *param, u
 
 // Create the virtual pad and give it to a user. Returns 0 when samples reach
 // it; the report says what every step returned either way.
-static int pad_open(int32_t user_id, char *report, size_t size)
+static int pad_open(int32_t user_id, bool evict, char *report, size_t size)
 {
     if (g_pad.open)
     {
@@ -507,13 +578,14 @@ static int pad_open(int32_t user_id, char *report, size_t size)
 
     uint64_t device_id = 0;
     if (log >= 0)
-    {
         device_id = klog_wait_device(log, 3000, report, size);
-        close(log);
-    }
     note(report, size, "device=0x%llx", (unsigned long long)device_id);
     if (added != 0 && (uint32_t)added != PS5LOOP_ASSIGNMENT_PENDING && device_id == 0)
+    {
+        if (log >= 0)
+            close(log);
         return -1;
+    }
 
     // Without this the console shows "Who's using this controller?" and waits
     // for a person: binding is what choosing a profile there does.
@@ -521,6 +593,17 @@ static int pad_open(int32_t user_id, char *report, size_t size)
         note(report, size, "bind=0x%08x", (uint32_t)mbus_bind(device_id, user_id));
     else
         note(report, size, "bind=skipped");
+
+    if (log >= 0)
+        close(log);
+
+    // A title reads its user's first controller; while a real one holds that
+    // place the virtual pad is the second and no title opens it. Read the login
+    // manager's controller table from the kernel log and disconnect the others,
+    // so the virtual pad is first. (PS on a real pad brings it back.) --beside
+    // keeps them, for the home screen.
+    if (evict && mbus_disconnect != NULL)
+        klog_evict_cim(device_id, report, size);
 
     const int32_t handle = pad_find_handle(added, &param, device_id, report, size);
     if (handle < 0)
@@ -636,7 +719,7 @@ static void grab(int client, const char *request, const char *folder, int wait_m
     const int file = open(request, O_WRONLY | O_CREAT | O_TRUNC, 0666);
     if (file < 0)
     {
-        reply(client, "err grab %s: %s", request, strerror(errno));
+        reply(client, "err frame %s: %s", request, strerror(errno));
         return;
     }
     close(file);
@@ -661,7 +744,7 @@ static void grab(int client, const char *request, const char *folder, int wait_m
     }
     // A request nobody took must not wait for the next launch by hand.
     const bool taken = unlink(request) != 0;
-    reply(client, "err grab no picture in %s within %d ms (the title %s the request)", folder,
+    reply(client, "err frame no picture in %s within %d ms (the title %s the request)", folder,
           wait_ms, taken ? "took" : "never took");
 }
 
@@ -829,14 +912,15 @@ static bool direct_shot(int client, int type, int wait_ms, char *report, size_t 
 
 // Take the console's own screenshot: hold Create as a person would, wait for a
 // picture newer than the press whose size has stopped growing, send it, and
-// delete it from the console. (Asking the screenshot service instead, "capture",
-// never answers a payload.)
+// delete it from the console. (Asking the screenshot service instead,
+// "direct-screenshot", never answers a payload.)
 static void take_shot(int client, int hold_ms)
 {
     char report[PS5LOOP_LINE - 128] = {0};
     if (!g_pad.open)
     {
-        reply(client, "err shot needs the pad: pad open first (latest sends the newest capture)");
+        reply(client,
+              "err screenshot needs the pad: pad open first (latest-capture sends the newest one)");
         return;
     }
     capture_libraries(report, sizeof(report));
@@ -860,7 +944,7 @@ static void take_shot(int client, int hold_ms)
         }
         last_size = after[0].size;
     }
-    reply(client, "err shot no new capture within %d ms (newest is still %s)", PS5LOOP_SHOT_WAIT_MS,
+    reply(client, "err screenshot no new capture within %d ms (newest is still %s)", PS5LOOP_SHOT_WAIT_MS,
           before[0].path[0] != '\0' ? before[0].path : "none");
 }
 
@@ -886,7 +970,7 @@ static int handle_command(int client, char *line)
         reply(client, "ok bye %s", report);
         return -1;
     }
-    if (strcmp(command, "shots") == 0)
+    if (strcmp(command, "list-captures") == 0)
     {
         capture_t newest[PS5LOOP_NEWEST];
         captures_newest(newest);
@@ -896,7 +980,7 @@ static int handle_command(int client, char *line)
         reply(client, "ok shots %s", report[0] != '\0' ? report : "none");
         return 0;
     }
-    if (strcmp(command, "latest") == 0)
+    if (strcmp(command, "latest-capture") == 0)
     {
         capture_t newest[PS5LOOP_NEWEST];
         captures_newest(newest);
@@ -906,25 +990,64 @@ static int handle_command(int client, char *line)
             send_file(client, &newest[0]);
         return 0;
     }
-    if (strcmp(command, "shot") == 0)
+    if (strcmp(command, "screenshot") == 0)
     {
         const char *const hold = strtok(NULL, " \t");
         const int hold_ms = hold != NULL ? atoi(hold) : PS5LOOP_CREATE_HOLD_MS;
         take_shot(client, hold_ms > 0 && hold_ms <= 5000 ? hold_ms : PS5LOOP_CREATE_HOLD_MS);
         return 0;
     }
-    if (strcmp(command, "forget") == 0)
+    if (strcmp(command, "delete-capture") == 0)
     {
         // Delete a capture as the gallery does: file, thumbnail, database row.
         const char *const path = strtok(NULL, " \t");
         capture_libraries(report, sizeof(report));
         if (path == NULL || strncmp(path, "/user/av_contents/", 18) != 0 || strstr(path, "..") != NULL)
-            reply(client, "err usage: forget /user/av_contents/...");
+            reply(client, "err usage: delete-capture /user/av_contents/... (got %s)",
+                  path != NULL ? path : "(none)");
         else
-            reply(client, "ok forget result=0x%08x %s", (uint32_t)capture_delete(path), path);
+            reply(client, "ok delete-capture result=0x%08x %s", (uint32_t)capture_delete(path), path);
         return 0;
     }
-    if (strcmp(command, "capture") == 0)
+    if (strcmp(command, "kernel-log") == 0)
+    {
+        // bring-up: dump the kernel log for a while, so another firmware's device
+        // and controller lines can be read from the host (the format the device
+        // id and the controller table are recovered from differs by firmware).
+        const char *const ms = strtok(NULL, " \t");
+        int wait_ms = ms != NULL ? atoi(ms) : 1500;
+        if (wait_ms < 1 || wait_ms > 15000)
+            wait_ms = 1500;
+        const int log = klog_open();
+        if (log < 0)
+        {
+            reply(client, "err klog: %s", strerror(errno));
+            return 0;
+        }
+        const size_t cap = 1u << 20;
+        char *const buffer = malloc(cap);
+        size_t used = 0;
+        const uint64_t deadline = monotonic_us() + (uint64_t)wait_ms * 1000u;
+        while (buffer != NULL && used + 1 < cap && monotonic_us() < deadline)
+        {
+            const ssize_t bytes = klog_read(log, buffer + used, cap - 1 - used, 100);
+            if (bytes < 0)
+                break;
+            used += (size_t)bytes;
+        }
+        close(log);
+        reply(client, "ok file size=%zu mtime=0 path=klog", used);
+        for (size_t sent = 0; buffer != NULL && sent < used;)
+        {
+            const ssize_t step = send(client, buffer + sent, used - sent, 0);
+            if (step <= 0)
+                break;
+            sent += (size_t)step;
+        }
+        free(buffer);
+        return 0;
+    }
+    if (strcmp(command, "direct-screenshot") == 0)
     {
         // bring-up: the screenshot service alone, with its type argument
         const char *const type = strtok(NULL, " \t");
@@ -932,14 +1055,14 @@ static int handle_command(int client, char *line)
             reply(client, "err capture %s", report);
         return 0;
     }
-    if (strcmp(command, "grab") == 0)
+    if (strcmp(command, "frame") == 0)
     {
         const char *const request = strtok(NULL, " \t");
         const char *const folder = strtok(NULL, " \t");
         const char *const wait = strtok(NULL, " \t");
         const int wait_ms = wait != NULL ? atoi(wait) : 3000;
         if (request == NULL || folder == NULL || request[0] != '/' || folder[0] != '/')
-            reply(client, "err usage: grab /REQUEST/FILE /PICTURE/FOLDER [MS]");
+            reply(client, "err usage: frame /REQUEST/FILE /PICTURE/FOLDER [MS]");
         else
             grab(client, request, folder, wait_ms > 0 && wait_ms <= 30000 ? wait_ms : 3000);
         return 0;
@@ -962,8 +1085,12 @@ static int handle_command(int client, char *line)
     }
     if (strcmp(action, "open") == 0)
     {
-        const int32_t user = count > 0 ? (int32_t)strtoul(arguments[0], NULL, 0) : -1;
-        const int status = pad_open(user, report, sizeof(report));
+        // "pad open [USER] [keep]": keep leaves real controllers connected.
+        const bool keep = (count > 0 && strcmp(arguments[0], "keep") == 0) ||
+                          (count > 1 && strcmp(arguments[1], "keep") == 0);
+        const int32_t user =
+            (count > 0 && strcmp(arguments[0], "keep") != 0) ? (int32_t)strtoul(arguments[0], NULL, 0) : -1;
+        const int status = pad_open(user, !keep, report, sizeof(report));
         reply(client, "%s pad %s%s", status == 0 ? "ok" : "err", status == 0 ? "open " : "", report);
         return 0;
     }
