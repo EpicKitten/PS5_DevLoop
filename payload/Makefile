@@ -20,7 +20,7 @@ LDLIBS := -lScePad -lSceUserService -lSceSystemService -lSceAppInstUtil -lSceNot
 
 all: $(ELF)
 
-$(ELF): main.c | $(OUTPUT)
+$(ELF): main.c dashboard_html.h | $(OUTPUT)
 	$(CC) $(CFLAGS) -o $@ main.c $(LDLIBS)
 
 $(OUTPUT):

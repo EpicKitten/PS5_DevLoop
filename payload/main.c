@@ -45,8 +45,9 @@
  *   uninstall TITLE_ID        uninstall a title
  *   power off|reboot|rest     power off, reboot, or enter rest mode
  *   notify TYPE MESSAGE       show a message: TYPE is toast or flyout
- *   hwinfo                    model, serial, temperatures, cpu clock
+ *   hwinfo                    model, serial, cpu + all SoC temperatures, cpu clock
  *   df                        free space per mounted volume
+ *   GET / , GET /api/hwinfo   a browser gets the live dashboard, hosted here
  *   kill PID                  end a process
  *   peek PID ADDR LEN         read a process's memory
  *   poke PID ADDR HEX         write a process's memory
@@ -119,6 +120,8 @@
 
 #include <ps5/kernel.h>
 #include <ps5/mdbg.h>
+
+#include "dashboard_html.h" // the live dashboard, embedded so the console hosts it
 
 #define PS5LOOP_PORT 9112
 #define PS5LOOP_LINE 1024
@@ -1138,6 +1141,125 @@ static void list_dir(int client, const char *path)
     free(text);
 }
 
+// SHA-256 (FIPS 180-4), self-contained so the payload needs no crypto stub.
+typedef struct { uint32_t state[8]; uint64_t bitlen; uint8_t buf[64]; size_t len; } sha256_ctx;
+
+static uint32_t sha256_ror(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+
+static void sha256_block(sha256_ctx *c, const uint8_t *p)
+{
+    static const uint32_t k[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+        0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+        0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+        0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+        0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2 };
+    uint32_t w[64];
+    for (int i = 0; i < 16; i++)
+        w[i] = (uint32_t)p[i * 4] << 24 | (uint32_t)p[i * 4 + 1] << 16 |
+               (uint32_t)p[i * 4 + 2] << 8 | (uint32_t)p[i * 4 + 3];
+    for (int i = 16; i < 64; i++)
+    {
+        const uint32_t s0 = sha256_ror(w[i - 15], 7) ^ sha256_ror(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        const uint32_t s1 = sha256_ror(w[i - 2], 17) ^ sha256_ror(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    uint32_t a = c->state[0], b = c->state[1], cc = c->state[2], d = c->state[3];
+    uint32_t e = c->state[4], f = c->state[5], g = c->state[6], h = c->state[7];
+    for (int i = 0; i < 64; i++)
+    {
+        const uint32_t S1 = sha256_ror(e, 6) ^ sha256_ror(e, 11) ^ sha256_ror(e, 25);
+        const uint32_t ch = (e & f) ^ (~e & g);
+        const uint32_t t1 = h + S1 + ch + k[i] + w[i];
+        const uint32_t S0 = sha256_ror(a, 2) ^ sha256_ror(a, 13) ^ sha256_ror(a, 22);
+        const uint32_t maj = (a & b) ^ (a & cc) ^ (b & cc);
+        const uint32_t t2 = S0 + maj;
+        h = g; g = f; f = e; e = d + t1; d = cc; cc = b; b = a; a = t1 + t2;
+    }
+    c->state[0] += a; c->state[1] += b; c->state[2] += cc; c->state[3] += d;
+    c->state[4] += e; c->state[5] += f; c->state[6] += g; c->state[7] += h;
+}
+
+static void sha256_init(sha256_ctx *c)
+{
+    c->state[0] = 0x6a09e667; c->state[1] = 0xbb67ae85; c->state[2] = 0x3c6ef372; c->state[3] = 0xa54ff53a;
+    c->state[4] = 0x510e527f; c->state[5] = 0x9b05688c; c->state[6] = 0x1f83d9ab; c->state[7] = 0x5be0cd19;
+    c->bitlen = 0; c->len = 0;
+}
+
+static void sha256_update(sha256_ctx *c, const uint8_t *data, size_t n)
+{
+    for (size_t i = 0; i < n; i++)
+    {
+        c->buf[c->len++] = data[i];
+        if (c->len == 64) { sha256_block(c, c->buf); c->bitlen += 512; c->len = 0; }
+    }
+}
+
+static void sha256_final(sha256_ctx *c, uint8_t out[32])
+{
+    const uint64_t bits = c->bitlen + (uint64_t)c->len * 8;
+    size_t i = c->len;
+    c->buf[i++] = 0x80;
+    if (i > 56) { while (i < 64) c->buf[i++] = 0; sha256_block(c, c->buf); i = 0; }
+    while (i < 56) c->buf[i++] = 0;
+    for (int j = 7; j >= 0; j--) c->buf[i++] = (uint8_t)(bits >> (j * 8));
+    sha256_block(c, c->buf);
+    for (int j = 0; j < 8; j++)
+    {
+        out[j * 4] = (uint8_t)(c->state[j] >> 24);
+        out[j * 4 + 1] = (uint8_t)(c->state[j] >> 16);
+        out[j * 4 + 2] = (uint8_t)(c->state[j] >> 8);
+        out[j * 4 + 3] = (uint8_t)c->state[j];
+    }
+}
+
+// hash: SHA-256 of a file as hex. Reads through the sandbox escape like `get`,
+// so it can verify a transfer (compare with sha256sum on the host) without
+// pulling the whole file back.
+static void hash_file(int client, const char *path)
+{
+    const intptr_t saved = fs_escape();
+    const int file = open(path, O_RDONLY);
+    struct stat st;
+    if (file < 0 || fstat(file, &st) != 0)
+    {
+        const int err = errno;
+        if (file >= 0)
+            close(file);
+        fs_restore(saved);
+        reply(client, "err hash %s: %s", path, strerror(err));
+        return;
+    }
+    sha256_ctx ctx;
+    sha256_init(&ctx);
+    char buffer[65536];
+    ssize_t got;
+    long long total = 0;
+    while ((got = read(file, buffer, sizeof(buffer))) > 0)
+    {
+        sha256_update(&ctx, (const uint8_t *)buffer, (size_t)got);
+        total += got;
+    }
+    const int read_err = got < 0 ? errno : 0;
+    close(file);
+    fs_restore(saved);
+    if (read_err != 0)
+    {
+        reply(client, "err hash %s: %s", path, strerror(read_err));
+        return;
+    }
+    uint8_t digest[32];
+    sha256_final(&ctx, digest);
+    char hex[65];
+    for (int i = 0; i < 32; i++)
+        snprintf(hex + i * 2, 3, "%02x", digest[i]);
+    reply(client, "ok hash sha256=%s size=%lld path=%s", hex, total, path);
+}
+
 // get: send a file's bytes.
 static void get_file(int client, const char *path)
 {
@@ -1444,17 +1566,88 @@ long sceKernelGetCpuFrequency(void);
 int sceKernelGetCpuTemperature(int *);
 int sceKernelGetSocSensorTemperature(int, int *);
 
+// The SoC exposes many thermal sensors, not one: sceKernelGetSocSensorTemperature
+// answers for ids 0..63 (probed on 13.60; a few succeed on 12.20). Scan them all
+// and keep the plausible readings, so hwinfo reports the whole thermal picture
+// and the hottest point, not just sensor 0.
+#define HWINFO_SOC_SENSORS 64
+
+typedef struct hwinfo
+{
+    uint32_t fw;
+    char model[256];
+    char serial[256];
+    long cpuMHz;
+    int cpuC;
+    int soc0;    // sensor 0, kept as the back-compatible socC
+    int socMax;  // the hottest valid sensor
+    int socMaxId;
+    int socN;    // how many sensors answered plausibly
+    int socIds[HWINFO_SOC_SENSORS];
+    int socVals[HWINFO_SOC_SENSORS];
+} hwinfo_t;
+
+static void hwinfo_read(hwinfo_t *h)
+{
+    memset(h, 0, sizeof(*h));
+    strcpy(h->model, "?");
+    strcpy(h->serial, "?");
+    h->fw = kernel_get_fw_version();
+    (void)sceKernelGetHwModelName(h->model);
+    (void)sceKernelGetHwSerialNumber(h->serial);
+    (void)sceKernelGetCpuTemperature(&h->cpuC);
+    h->cpuMHz = sceKernelGetCpuFrequency() / 1000000;
+    h->socMax = 0;
+    h->socMaxId = -1;
+    for (int id = 0; id < HWINFO_SOC_SENSORS; id++)
+    {
+        int value = 0;
+        if (sceKernelGetSocSensorTemperature(id, &value) != 0)
+            continue;
+        if (value < -40 || value > 150) // drop the known anomalous reading (id 64 ~ -49)
+            continue;
+        h->socIds[h->socN] = id;
+        h->socVals[h->socN] = value;
+        h->socN++;
+        if (id == 0)
+            h->soc0 = value;
+        if (h->socMaxId < 0 || value > h->socMax)
+        {
+            h->socMax = value;
+            h->socMaxId = id;
+        }
+    }
+}
+
 static void hwinfo(int client)
 {
-    char model[256] = "?", serial[256] = "?";
-    int cpu_temp = 0, soc_temp = 0;
-    (void)sceKernelGetHwModelName(model);
-    (void)sceKernelGetHwSerialNumber(serial);
-    (void)sceKernelGetCpuTemperature(&cpu_temp);
-    (void)sceKernelGetSocSensorTemperature(0, &soc_temp);
-    reply(client, "ok fw=0x%08x model=%s serial=%s cpuC=%d socC=%d cpuMHz=%ld",
-          kernel_get_fw_version(), model, serial, cpu_temp, soc_temp,
-          sceKernelGetCpuFrequency() / 1000000);
+    hwinfo_t h;
+    hwinfo_read(&h);
+    reply(client,
+          "ok fw=0x%08x model=%s serial=%s cpuC=%d socC=%d socMax=%d socMaxId=%d socN=%d cpuMHz=%ld",
+          h.fw, h.model, h.serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz);
+}
+
+// The same reading as a JSON object, for the dashboard the console hosts. The
+// caller frees the buffer; NULL on out of memory.
+static char *hwinfo_json(void)
+{
+    hwinfo_t h;
+    hwinfo_read(&h);
+    char model[520], serial[520];
+    json_escape(model, sizeof(model), h.model);
+    json_escape(serial, sizeof(serial), h.serial);
+    size_t cap = 1u << 12, used = 0;
+    char *json = malloc(cap);
+    json = text_append(json, &cap, &used,
+                       "{\"ok\":true,\"fw\":\"0x%08x\",\"model\":\"%s\",\"serial\":\"%s\","
+                       "\"cpuC\":%d,\"socC\":%d,\"socMax\":%d,\"socMaxId\":%d,\"socN\":%d,"
+                       "\"cpuMHz\":%ld,\"socSensors\":[",
+                       h.fw, model, serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz);
+    for (int i = 0; json != NULL && i < h.socN; i++)
+        json = text_append(json, &cap, &used, "%s{\"id\":%d,\"c\":%d}", i ? "," : "", h.socIds[i],
+                           h.socVals[i]);
+    return text_append(json, &cap, &used, "]}");
 }
 
 // df: free space per mounted volume.
@@ -1624,6 +1817,54 @@ static void http_get(int client, const char *url)
 }
 
 // Answer one command. Returns 0 to keep serving, -1 to leave the console.
+// A minimal HTTP/1.1 response on the same port the text protocol uses: the
+// first word of a browser's request is GET (or HEAD), which the dispatcher
+// routes here. One request per connection; the server closes it after.
+static void http_send(int client, const char *status, const char *ctype, const void *body,
+                      size_t len, bool head_only)
+{
+    char header[256];
+    const int n = snprintf(header, sizeof(header),
+                           "HTTP/1.1 %s\r\nContent-Type: %s\r\nContent-Length: %zu\r\n"
+                           "Cache-Control: no-store\r\nConnection: close\r\n\r\n",
+                           status, ctype, len);
+    if (n > 0 && send(client, header, (size_t)n, 0) < 0)
+        return;
+    if (head_only || len == 0)
+        return;
+    for (size_t sent = 0; sent < len;)
+    {
+        const ssize_t step = send(client, (const char *)body + sent, len - sent, 0);
+        if (step <= 0)
+            break;
+        sent += (size_t)step;
+    }
+}
+
+static void http_serve_page(int client, const char *verb, const char *url)
+{
+    const bool head_only = strcmp(verb, "HEAD") == 0;
+    if (url == NULL)
+        url = "/";
+    if (strcmp(url, "/") == 0 || strcmp(url, "/index.html") == 0)
+    {
+        http_send(client, "200 OK", "text/html; charset=utf-8", DASHBOARD_HTML, DASHBOARD_HTML_LEN,
+                  head_only);
+        return;
+    }
+    if (strcmp(url, "/api/hwinfo") == 0)
+    {
+        char *const json = hwinfo_json();
+        if (json == NULL)
+            http_send(client, "500 Internal Server Error", "text/plain", "oom", 3, head_only);
+        else
+            http_send(client, "200 OK", "application/json", json, strlen(json), head_only);
+        free(json);
+        return;
+    }
+    http_send(client, "404 Not Found", "text/plain; charset=utf-8", "not found", 9, head_only);
+}
+
 static int handle_command(int client, char *line, const char *body, size_t body_len)
 {
     char report[PS5LOOP_LINE - 64] = {0};
@@ -1631,6 +1872,12 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     if (command == NULL)
     {
         reply(client, "err empty");
+        return 0;
+    }
+    if (strcmp(command, "GET") == 0 || strcmp(command, "HEAD") == 0)
+    {
+        // a browser: serve the live dashboard and its /api/hwinfo over HTTP
+        http_serve_page(client, command, strtok(NULL, " \t"));
         return 0;
     }
     if (strcmp(command, "ping") == 0)
@@ -1764,6 +2011,15 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             reply(client, "err usage: get /PATH");
         else
             get_file(client, path);
+        return 0;
+    }
+    if (strcmp(command, "hash") == 0)
+    {
+        const char *const path = strtok(NULL, " \t");
+        if (path == NULL || path[0] != '/')
+            reply(client, "err usage: hash /PATH");
+        else
+            hash_file(client, path);
         return 0;
     }
     if (strcmp(command, "put") == 0)

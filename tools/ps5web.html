@@ -45,6 +45,16 @@
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .swatch { width: 12px; height: 3px; border-radius: 2px; display: inline-block; }
   canvas { width: 100%; height: 180px; display: block; }
+  .sensors-card { margin-top: 14px; padding: 16px; }
+  .sensors { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chip {
+    display: inline-flex; align-items: baseline; gap: 5px; padding: 6px 9px;
+    border: 1px solid var(--line); border-radius: 9px; background: var(--panel2);
+    font-size: 13px; font-variant-numeric: tabular-nums;
+  }
+  .chip .id { color: var(--muted); font-size: 11px; }
+  .chip .c { font-weight: 650; }
+  .chip.hot { border-color: var(--hot); } .chip.warm { border-color: var(--warm); }
   footer { color: var(--muted); font-size: 12px; margin-top: 18px; text-align: center; }
 </style>
 </head>
@@ -72,7 +82,7 @@
       </svg>
     </div>
     <div class="card">
-      <div class="label">SoC temp</div>
+      <div class="label">SoC hottest <span id="soc-sub" style="text-transform:none;letter-spacing:0"></span></div>
       <svg class="gauge" viewBox="0 0 120 78" id="g-soc">
         <path d="M10 62 A50 50 0 0 1 110 62" fill="none" stroke="#223049" stroke-width="10" stroke-linecap="round"/>
         <path d="M10 62 A50 50 0 0 1 110 62" fill="none" stroke="var(--cool)" stroke-width="10"
@@ -85,6 +95,14 @@
       <div class="big" id="mhz">—</div>
       <div class="unit">MHz</div>
     </div>
+  </div>
+
+  <div class="card sensors-card">
+    <div class="chart-head">
+      <span class="label">SoC sensors</span>
+      <span class="legend" id="sensor-count"></span>
+    </div>
+    <div class="sensors" id="sensors"><span style="color:var(--muted);font-size:13px">—</span></div>
   </div>
 
   <div class="card chart-card">
@@ -115,6 +133,22 @@ function setGauge(id, temp) {
   arc.setAttribute("stroke", zone(temp));
   g.style.color = zone(temp);
   text.firstChild.nodeValue = temp == null ? "—" : String(temp);
+}
+
+const zoneClass = t => t >= 75 ? "hot" : t >= 58 ? "warm" : "";
+
+function renderSensors(list) {
+  const box = document.getElementById("sensors");
+  const count = document.getElementById("sensor-count");
+  if (!Array.isArray(list) || !list.length) {
+    box.innerHTML = '<span style="color:var(--muted);font-size:13px">no per-sensor data</span>';
+    count.textContent = "";
+    return;
+  }
+  count.textContent = list.length + " reading" + (list.length === 1 ? "" : "s");
+  box.innerHTML = list.map(s =>
+    `<span class="chip ${zoneClass(s.c)}"><span class="id">#${s.id}</span>` +
+    `<span class="c" style="color:${zone(s.c)}">${s.c}°</span></span>`).join("");
 }
 
 function drawChart() {
@@ -163,10 +197,14 @@ async function poll() {
     document.getElementById("fw").textContent = d.fw || "—";
     document.getElementById("serial").textContent = d.serial || "—";
     document.getElementById("mhz").textContent = d.cpuMHz == null ? "—" : d.cpuMHz;
+    const socMax = d.socMax != null ? d.socMax : d.socC;
+    document.getElementById("soc-sub").textContent =
+      d.socMaxId != null && d.socMaxId >= 0 ? "#" + d.socMaxId : "";
     setGauge("g-cpu", d.cpuC);
-    setGauge("g-soc", d.socC);
+    setGauge("g-soc", socMax);
+    renderSensors(d.socSensors);
     if (d.cpuC != null) { hist.cpu.push(d.cpuC); if (hist.cpu.length > MAX) hist.cpu.shift(); }
-    if (d.socC != null) { hist.soc.push(d.socC); if (hist.soc.length > MAX) hist.soc.shift(); }
+    if (socMax != null) { hist.soc.push(socMax); if (hist.soc.length > MAX) hist.soc.shift(); }
     drawChart();
     status(true, "connected · " + new Date().toLocaleTimeString());
   } catch (e) {

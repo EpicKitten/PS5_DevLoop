@@ -31,6 +31,7 @@ Commands:
   ps                    list the console's processes (with title ids)
   ls PATH               list a console directory
   get REMOTE [LOCAL]    download a console file (default: downloads/<name>)
+  hash PATH             SHA-256 of a console file (verify a transfer in place)
   put LOCAL REMOTE      upload a local file to the console
   rm PATH               delete a console file
   mv SRC DST            move or rename a console file
@@ -384,6 +385,7 @@ def main():
     getting = commands.add_parser("get")
     getting.add_argument("remote")
     getting.add_argument("local", nargs="?")
+    commands.add_parser("hash").add_argument("path")
     putting = commands.add_parser("put")
     putting.add_argument("local")
     putting.add_argument("remote")
@@ -453,6 +455,8 @@ def main():
         return fetch_text(f"ls {args.path}")
     if args.command == "get":
         return get_file(args.remote, args.local)
+    if args.command == "hash":
+        return say(command(f"hash {args.path}", timeout=300)[0])
     if args.command == "put":
         return put_file(args.local, args.remote)
     if args.command == "rm":
