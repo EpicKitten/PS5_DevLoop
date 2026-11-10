@@ -131,7 +131,9 @@ disable that first.
 
 Verified on firmware 12.20: `ps`, `ls`/`get`/`put`/`rm`/`mv` (a round trip is
 byte-for-byte), `hash` (matches `sha256sum` for a 1 MB file and an empty file),
-`open-url`, `close-app`, `locate-title`, `module`/`modules`/`dlsym`, `hwinfo`
+`open-url`, `close-app`, `locate-title`, `module`/`modules`/`dlsym`, `call`
+(ptrace thread-hijack, proved against a disposable sleeper: `getpid`→its own pid,
+`abs(-5)`→5, target survived), `hwinfo`
 (all 64 SoC sensors answer), `df`, `led`/`fan`/`beeper` (ICC ioctls/calls return
 success, including the `breathe`/`chase`/`auto` effects and beeper `mute`/`vol`),
 `scan`/`scan-aob` (hit a known probe), `kern-read`/`kern-write` and `setting-set`

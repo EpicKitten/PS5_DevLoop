@@ -18,8 +18,9 @@ Legend: **done** = implemented and verified on firmware 12.20.
   on the console).
 - **Processes** — `ps`, `kill`, `locate-title` (the foreground app's ids),
   `module PID NAME` (where a module is mapped), `modules PID` (every loaded
-  module), `dlsym PID NAME SYM` (resolve a symbol), `exec /PATH` (run a console
-  binary and capture its output).
+  module), `dlsym PID NAME SYM` (resolve a symbol), `call PID FUNC [ARGS]`
+  (invoke a function with up to six integer args, returns RAX, via a ptrace
+  thread-hijack), `exec /PATH` (run a console binary and capture its output).
 - **Process memory** — `peek`, `poke` (read back and verified), `scan` (find a
   1/2/4/8-byte integer in a span), `scan-aob` (find a byte pattern, `??`
   wildcards).
@@ -55,20 +56,9 @@ command protocol. Landed: memory `scan`/`scan-aob`, `kern-read`/`kern-write`
 (verified), readback-verified `poke`, `klog-stream`, the UDP `discover` beacon,
 `locate-title`, `module`/`dlsym`, and — from PS5-Suite's live-hardware research —
 the console `led`, `fan` and `beeper` (all direct device access, so the `led`
-needs no `scePad` handle). The SDK already provides `kernel_proc_copyin/copyout`
-(the syscall-573-style cross-process primitive) should `peek`/`poke` ever want
-it instead of `mdbg`.
-
-### Implemented but not yet hardware-verified
-
-- **`call PID FUNC [ARGS]`** — invoke a function in a process by a ptrace
-  thread-hijack: attach, save the registers, point RIP at FUNC with up to six
-  integer args in the SysV registers and a faulting return address, continue,
-  read RAX when it traps back, then restore and detach. It builds clean and the
-  `dlsym` → `call` path is sound, but it has **not** been run against a live
-  process: ptrace can be restricted on PS5 (attach fails cleanly if so), a
-  process cannot ptrace itself, and a running title must not be risked, so a
-  positive run needs a dedicated throwaway target. Treat it as experimental.
+needs no `scePad` handle). Not a planned command, just an available primitive:
+the SDK provides `kernel_proc_copyin/copyout` (the syscall-573-style cross-process
+access) should `peek`/`poke` ever want it instead of `mdbg`, which they use today.
 
 ## Not possible from a background payload (architectural, not a choice)
 
@@ -110,3 +100,23 @@ exists, which it now is).
   positive run needs a real `.pkg` / binary on the console to confirm.
 - Writes are read back and verified where it is cheap (`poke`, `kern-write`,
   `setting-set`), so a silent failure is reported as `verify=mismatch`.
+
+## Verification status
+
+- **Exercised on hardware (12.20) this session:** `hwinfo` (64 SoC sensors),
+  `df`, `locate-title`, `discover`, `kern-read`, `modules`/`module`, `dlsym`,
+  `scan` (found a known value at its exact address), `fan` (duty read), `led`
+  (set then `auto`), `ps`, `kill`, the console-hosted dashboard (`GET /`,
+  `/api/hwinfo`), `hash` (matches `sha256sum`), and `call` — proved against a
+  disposable sleeper process: `call getpid` returned the sleeper's own pid
+  (`rax=0x1a0`), `call abs(-5)` returned `0x5`, and the target survived the
+  thread-hijack. ptrace is not restricted on 12.20. The earlier capability work
+  (`ps`, files, `notify`, `peek`, `http`, power, apps) was verified when it landed.
+- **Confirmed by code, not run live** (running them would disturb a live title or
+  cut access): write-verify readback for `poke` / `kern-write` / `setting-set`
+  (each reports `verify=ok|mismatch`), and rest/resume survival (the accept loop
+  re-binds the listener every second until the network returns).
+- **Not verified:** `install` / `exec` need a real `.pkg` / binary, and the
+  `setting-set` / `kern-write` / `poke` *write* paths were not fired at a target
+  to avoid changing console state while a title ran (the readback logic is
+  confirmed by code above).
