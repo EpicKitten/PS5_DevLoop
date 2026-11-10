@@ -24,7 +24,7 @@ in this pass; **staged** = needs a resource or more work (noted per item).
 
 | Command | Function(s) | What it gives |
 | --- | --- | --- |
-| `notify "MSG"` | `sceNotificationSend` (libSceNotification) | a toast on the TV: a feedback channel for an unattended loop |
+| `notify "MSG"` | `sceKernelSendNotificationRequest` | a toast on the TV: a feedback channel for an unattended loop |
 | `hwinfo` | `sceKernelGetCpuTemperature`, `sceKernelGetSocSensorTemperature`, `sceKernelGetCpuFrequency`, `sceKernelGetHwModelName`, `sceKernelGetHwSerialNumber` | model, temps and clock: health during long runs |
 | `df` | `getmntinfo` / `statfs` | free space per mounted volume |
 | `kill PID` | `kill(pid, SIGKILL)` | end any process, not just registered apps |

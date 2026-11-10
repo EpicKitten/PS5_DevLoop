@@ -1307,26 +1307,25 @@ static void uninstall_app(int client, const char *title_id)
 // A static buffer whose address ping reports, so peek/poke can be verified.
 static char g_probe[32] = "DEVLOOP-MDBG-PROBE";
 
-// notify: a toast on the TV, through the notification service's JSON template.
-int sceNotificationSend(int user_id, bool is_logged, const char *payload);
-#define PS5LOOP_NOTIFY_USER 0xFE
+// notify: a toast on the TV. The system notification request (a 45-byte header
+// then the message) shows the familiar banner; it is more reliable than the
+// JSON notification service, which accepts a request without always drawing it.
+int sceKernelSendNotificationRequest(int device, void *request, size_t size, int blocking);
+
+typedef struct notify_request
+{
+    char header[45];
+    char message[3075];
+} notify_request_t;
 
 static void notify(int client, const char *message)
 {
     ensure_elevated();
-    char safe[256];
-    size_t out = 0;
-    for (size_t in = 0; message[in] != '\0' && out + 1 < sizeof(safe); in++)
-        safe[out++] = (message[in] == '"' || message[in] == '\\') ? '\'' : message[in];
-    safe[out] = '\0';
-    char json[640];
-    snprintf(json, sizeof(json),
-             "{\"rawData\":{\"viewTemplateType\":\"InteractiveToastTemplateB\","
-             "\"channelType\":\"Downloads\",\"useCaseId\":\"IDC\",\"toastOverwriteType\":\"No\","
-             "\"isImmediate\":true,\"priority\":100,\"viewData\":{\"message\":{\"body\":\"%s\"},"
-             "\"subMessage\":{\"body\":\"DevLoop\"}}}}",
-             safe);
-    const int32_t result = sceNotificationSend(PS5LOOP_NOTIFY_USER, false, json);
+    notify_request_t request;
+    memset(&request, 0, sizeof(request));
+    snprintf(request.message, sizeof(request.message), "%s", message);
+    const int32_t result =
+        sceKernelSendNotificationRequest(0, &request, sizeof(request), 0);
     reply(client, "%s notify result=0x%08x", result == 0 ? "ok" : "err", (uint32_t)result);
 }
 
