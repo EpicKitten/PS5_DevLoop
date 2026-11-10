@@ -138,10 +138,9 @@ byte-for-byte), `hash` (matches `sha256sum` for a 1 MB file and an empty file),
 success, including the `breathe`/`chase`/`auto` effects and beeper `mute`/`vol`),
 `scan`/`scan-aob` (hit a known probe), `kern-read`/`kern-write` and `setting-set`
 (verified), `notify`, `peek`, `http`, the UDP beacon and `klog-stream`, and the
-console-hosted dashboard (`GET /`, `GET /api/hwinfo`). The dashboard's command
-endpoint (`GET /api/run?c=CMD`) and the control-panel page are new in this
-revision: the page renders and builds each command correctly, but the payload
-side has not yet been rebuilt and exercised on hardware. `install` and `exec` are
+console-hosted dashboard with its control panel (`GET /`, `GET /api/hwinfo`, and
+`GET /api/run?c=CMD` — verified on 12.20 with `ping`, `hwinfo` and `ls`, and the
+`put`/`quit`/`klog-stream` exclusion refused with 400). `install` and `exec` are
 wired and fail gracefully on a missing target (a positive run needs a real
 `.pkg` / binary); `wake` and rest-mode survival are host/standby paths not
 exercised in this session.
