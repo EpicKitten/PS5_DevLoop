@@ -40,15 +40,19 @@ Commands:
   close-app [APP_ID]    close a running app (app id from ps; else the big app)
   locate-title          what is in the foreground now (app id, pid, title id)
   module PID NAME       where a module is mapped in a process (base, entry)
+  modules PID           every loaded module in a process (handle, base, entry)
   dlsym PID NAME SYM    resolve a symbol's address in a process
+  install /PATH.pkg     install a .pkg already on the console
+  exec /PATH [ARGS]     run a console binary and return its output
+  wake                  wake from standby (UDP packet; needs PS5_WAKE_CREDENTIAL)
   rest / reboot / power-off   put the console in rest mode, reboot, or power off
   uninstall TITLE_ID    uninstall a title (registered titles; irreversible)
   notify TYPE MESSAGE   show a message: TYPE is toast (banner) or flyout (card)
   hwinfo                model, serial, temperatures and cpu clock
   df                    free space per mounted volume
-  led BLUE WHITE AMBER  set the indicator LED (levels 0..255, -1 leaves), or: led off
+  led ...               indicator LED: BLUE WHITE AMBER | off | auto | breathe B W A [MS] | chase [MS]
   fan [TEMP]            read the fan duty, or set the threshold (30..90 C)
-  beeper [PATTERN]      beep the console (pattern 0..3, default 1)
+  beeper [PATTERN|mute 0|1|vol 0..2]   beep, mute, or set the beeper volume
   kill PID              end a process by pid
   peek PID ADDR LEN     read a process's memory (prints hex + ascii)
   poke PID ADDR HEX     write a hex string into a process's memory (verified)
@@ -115,6 +119,44 @@ def console_host():
         if host:
             return host
     raise SystemExit("PS5_HOST is not set: export it, or copy .env.example to .env")
+
+
+def env_value(key):
+    """Read a value from the environment, then from .env."""
+    val = os.environ.get(key)
+    if val:
+        return val
+    local = ROOT / ".env"
+    if local.is_file():
+        for raw in local.read_text(encoding="utf-8").splitlines():
+            name, _, value = raw.strip().partition("=")
+            if name.strip() == key and value.strip():
+                return value.strip()
+    return None
+
+
+def wake():
+    """Wake the console from standby with the PS5 discovery WAKEUP packet (UDP
+    9302). Needs the console's user credential in PS5_WAKE_CREDENTIAL (env or
+    .env); the console wakes only for its own credential."""
+    cred = env_value("PS5_WAKE_CREDENTIAL")
+    if not cred:
+        raise SystemExit("wake needs PS5_WAKE_CREDENTIAL (the console's user credential) "
+                         "in the environment or .env")
+    packet = ("WAKEUP * HTTP/1.1\n"
+              "client-type:fl\n"
+              "auth-type:R\n"
+              "model:w\n"
+              "app-type:r\n"
+              f"user-credential:{cred}\n"
+              "device-discovery-protocol-version:00030010\n")
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        sock.sendto(packet.encode(), (console_host(), 9302))
+    finally:
+        sock.close()
+    print("wake packet sent (UDP 9302); the console wakes only if the credential matches")
+    return 0
 
 
 def command(line, timeout=30.0, payload=False):
@@ -469,26 +511,29 @@ def main():
     moduling = commands.add_parser("module")
     moduling.add_argument("pid")
     moduling.add_argument("name", help="a module basename, e.g. libc.sprx")
+    commands.add_parser("modules").add_argument("pid", help="list every loaded module in a process")
     dlsyming = commands.add_parser("dlsym")
     dlsyming.add_argument("pid")
     dlsyming.add_argument("name", help="a module basename")
     dlsyming.add_argument("symbol")
+    commands.add_parser("install").add_argument("path", help="a console path to a .pkg")
+    execing = commands.add_parser("exec")
+    execing.add_argument("args", nargs=argparse.REMAINDER, help="/PATH [ARGS] to run on the console")
     commands.add_parser("rest")
     commands.add_parser("reboot")
     commands.add_parser("power-off")
+    commands.add_parser("wake")
     commands.add_parser("uninstall").add_argument("title_id")
     notifying = commands.add_parser("notify")
     notifying.add_argument("type", choices=["toast", "flyout"])
     notifying.add_argument("message", nargs="+")
     commands.add_parser("hwinfo")
     commands.add_parser("df")
-    leds = commands.add_parser("led")
-    leds.add_argument("blue", help="0..255, -1 to leave, or the word 'off'")
-    leds.add_argument("white", nargs="?")
-    leds.add_argument("amber", nargs="?")
+    commands.add_parser("led").add_argument("args", nargs="+",
+        help="BLUE WHITE AMBER | off | auto | breathe B W A [MS] | chase [MS]")
     fanning = commands.add_parser("fan")
     fanning.add_argument("temp", nargs="?", help="omit to read; a number to set the threshold (30..90)")
-    commands.add_parser("beeper").add_argument("pattern", nargs="?", help="0..3 (default 1)")
+    commands.add_parser("beeper").add_argument("args", nargs="*", help="[PATTERN] | mute 0|1 | vol 0..2")
     commands.add_parser("kill").add_argument("pid")
     peeking = commands.add_parser("peek")
     peeking.add_argument("pid")
@@ -579,11 +624,24 @@ def main():
         return say(command("locate-title")[0])
     if args.command == "module":
         return say(command(f"module {args.pid} {args.name}")[0])
+    if args.command == "modules":
+        return fetch_text(f"modules {args.pid}")
     if args.command == "dlsym":
         return say(command(f"dlsym {args.pid} {args.name} {args.symbol}")[0])
+    if args.command == "install":
+        return say(command(f"install {args.path}", timeout=120)[0])
+    if args.command == "exec":
+        answer, data = command("exec " + " ".join(args.args), timeout=120, payload=True)
+        if not answer.startswith("ok file"):
+            return say(answer)
+        print(answer.split("path=", 1)[1] if "path=" in answer else "exec")
+        sys.stdout.write(data.decode("utf-8", "replace"))
+        return 0
     if args.command in ("rest", "reboot", "power-off"):
         what = {"rest": "rest", "reboot": "reboot", "power-off": "off"}[args.command]
         return say(command(f"power {what}")[0])
+    if args.command == "wake":
+        return wake()
     if args.command == "uninstall":
         return say(command(f"uninstall {args.title_id}")[0])
     if args.command == "notify":
@@ -593,15 +651,11 @@ def main():
     if args.command == "df":
         return fetch_text("df")
     if args.command == "led":
-        if args.blue == "off":
-            return say(command("led off")[0])
-        if args.white is None or args.amber is None:
-            return say("usage: led BLUE WHITE AMBER (each 0..255 or -1), or led off")
-        return say(command(f"led {args.blue} {args.white} {args.amber}")[0])
+        return say(command("led " + " ".join(args.args))[0])
     if args.command == "fan":
         return say(command(f"fan set {args.temp}" if args.temp else "fan")[0])
     if args.command == "beeper":
-        return say(command(f"beeper {args.pattern}" if args.pattern else "beeper")[0])
+        return say(command(("beeper " + " ".join(args.args)).strip())[0])
     if args.command == "kill":
         return say(command(f"kill {args.pid}")[0])
     if args.command == "peek":

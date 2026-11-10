@@ -42,17 +42,20 @@
  *   open-url URL              open a URL in the web browser
  *   launch TITLE_ID           launch a registered title
  *   close-app [APP_ID]        close a running app (default: the foreground one)
+ *   install /PATH.pkg         install a .pkg already on the console
+ *   exec /PATH [ARGS]         run a console binary, send back its output
  *   locate-title              the foreground app's ids (app id, pid, title id)
  *   module PID BASENAME       where a module is mapped in a process
+ *   modules PID               every loaded module in a process (handle/base/entry)
  *   dlsym PID BASENAME SYM    resolve a symbol's address in a process
  *   uninstall TITLE_ID        uninstall a title
  *   power off|reboot|rest     power off, reboot, or enter rest mode
  *   notify TYPE MESSAGE       show a message: TYPE is toast or flyout
  *   hwinfo                    model, serial, cpu + all SoC temperatures, cpu clock
  *   df                        free space per mounted volume
- *   led BLUE WHITE AMBER|off  set the console indicator LED (levels 0..255)
+ *   led BWA|off|auto|breathe B W A [MS]|chase [MS]   the console indicator LED
  *   fan [set TEMP]            read the fan duty, or set the threshold (30..90 C)
- *   beeper [PATTERN]          beep the console (pattern 0..3)
+ *   beeper [PATTERN]|mute 0|1|vol 0..2   beep, mute, or set the beeper volume
  *   GET / , GET /api/hwinfo   a browser gets the live dashboard, hosted here
  *   kill PID                  end a process
  *   peek PID ADDR LEN         read a process's memory
@@ -115,6 +118,7 @@
 #include <poll.h>
 #include <pthread.h>
 #include <signal.h>
+#include <spawn.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdint.h>
@@ -129,6 +133,7 @@
 #include <sys/sysctl.h>
 #include <sys/types.h>
 #include <sys/user.h>
+#include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
 
@@ -1594,6 +1599,115 @@ static void dlsym_lookup(int client, pid_t pid, const char *basename, const char
         reply(client, "ok dlsym pid=%d %s %s=0x%lx", (int)pid, basename, symbol, (long)addr);
 }
 
+// modules: every loaded module in a process. There is no enumeration call, so
+// walk the dynlib handle ids (they are small and sequential) and report the ones
+// with a mapping. Names need a kernel link-map walk, so this lists base/entry;
+// use `module PID NAME` for a named lookup.
+static void module_list(int client, pid_t pid)
+{
+    size_t cap = 1u << 13, used = 0;
+    char *text = malloc(cap);
+    text = text_append(text, &cap, &used, "%-8s %-18s %s\n", "HANDLE", "BASE", "ENTRY");
+    int found = 0;
+    for (uint32_t handle = 0; text != NULL && handle < 256; handle++)
+    {
+        const intptr_t base = kernel_dynlib_mapbase_addr(pid, handle);
+        if (base <= 0)
+            continue;
+        text = text_append(text, &cap, &used, "0x%-6x 0x%-16lx 0x%lx\n", handle, (long)base,
+                           (long)kernel_dynlib_entry_addr(pid, handle));
+        found++;
+    }
+    if (text == NULL)
+        reply(client, "err modules: out of memory");
+    else if (found == 0)
+        reply(client, "err modules pid=%d: none (bad pid?)", (int)pid);
+    else
+        send_bytes(client, "modules", text, used);
+    free(text);
+}
+
+// exec: run a binary and send back what it writes to stdout/stderr, then its
+// exit code. posix_spawn runs through the sandbox escape, so an absolute console
+// path resolves. A command DevLoop already has (ls, ps, ...) is usually better;
+// this is for running homebrew tools that live on the console.
+extern char **environ;
+
+static void exec_command(int client, char *argline)
+{
+    ensure_elevated();
+    char *argv[32];
+    int argc = 0;
+    for (char *tok = strtok(argline, " \t"); tok != NULL && argc < 31; tok = strtok(NULL, " \t"))
+        argv[argc++] = tok;
+    argv[argc] = NULL;
+    if (argc == 0)
+    {
+        reply(client, "err usage: exec /PATH [ARGS]");
+        return;
+    }
+    int pipefd[2];
+    if (pipe(pipefd) != 0)
+    {
+        reply(client, "err exec: pipe %s", strerror(errno));
+        return;
+    }
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    posix_spawn_file_actions_adddup2(&fa, pipefd[1], 1);
+    posix_spawn_file_actions_adddup2(&fa, pipefd[1], 2);
+    posix_spawn_file_actions_addclose(&fa, pipefd[0]);
+    posix_spawn_file_actions_addclose(&fa, pipefd[1]);
+    pid_t child = 0;
+    const intptr_t saved = fs_escape();
+    const int rc = posix_spawn(&child, argv[0], &fa, NULL, argv, environ);
+    fs_restore(saved);
+    posix_spawn_file_actions_destroy(&fa);
+    close(pipefd[1]);
+    if (rc != 0)
+    {
+        close(pipefd[0]);
+        reply(client, "err exec %s: %s", argv[0], strerror(rc));
+        return;
+    }
+    size_t cap = 1u << 14, used = 0;
+    char *out = malloc(cap);
+    char buffer[4096];
+    ssize_t got;
+    while (out != NULL && (got = read(pipefd[0], buffer, sizeof(buffer))) > 0)
+    {
+        if (cap - used < (size_t)got + 1)
+        {
+            const size_t want = used + (size_t)got + 1;
+            size_t grow = cap * 2 > want ? cap * 2 : want;
+            char *const bigger = realloc(out, grow);
+            if (bigger == NULL)
+            {
+                free(out);
+                out = NULL;
+                break;
+            }
+            out = bigger;
+            cap = grow;
+        }
+        memcpy(out + used, buffer, (size_t)got);
+        used += (size_t)got;
+    }
+    close(pipefd[0]);
+    int status = 0;
+    waitpid(child, &status, 0);
+    if (out == NULL)
+        reply(client, "err exec: out of memory");
+    else
+    {
+        char header[64];
+        snprintf(header, sizeof(header), "exec pid=%d rc=%d", (int)child,
+                 WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+        send_bytes(client, header, out, used);
+    }
+    free(out);
+}
+
 // Power: off and reboot do not return when they take; standby is "rest". The
 // reply goes out first, since the request may end the process before it would.
 int sceSystemServiceRequestPowerOff(void);
@@ -1623,6 +1737,21 @@ static void uninstall_app(int client, const char *title_id)
     const int32_t result = sceAppInstUtilAppUnInstall(title_id);
     reply(client, "%s uninstall %s result=0x%08x", result == 0 ? "ok" : "err", title_id,
           (uint32_t)result);
+}
+
+// install: install a .pkg already on the console, through the app installer.
+// Verification is limited without a package to try; the call returns its result
+// and the installer's status word. The path is a console path (e.g. /data/x.pkg).
+int sceAppInstUtilAppInstallPkg(const char *path, int *status);
+
+static void install_pkg(int client, const char *path)
+{
+    ensure_elevated();
+    sceAppInstUtilInitialize();
+    int status = 0;
+    const int32_t result = sceAppInstUtilAppInstallPkg(path, &status);
+    reply(client, "%s install %s result=0x%08x status=0x%08x", result == 0 ? "ok" : "err", path,
+          (uint32_t)result, (uint32_t)status);
 }
 
 // A static buffer whose address ping reports, so peek/poke can be verified.
@@ -1857,14 +1986,78 @@ static int icc_led_set(int blue, int white, int amber)
     return rc;
 }
 
-static void led_command(int client, int blue, int white, int amber)
+// The dynamic-LED ioctl holds only static levels, so breathe and chase are
+// animated in software by a thread, which also re-asserts the colour because
+// the shell periodically reclaims the LED. mode 0 = auto (we stop touching it,
+// the system takes it back), 1 = static hold, 2 = breathe, 3 = chase.
+static pthread_mutex_t g_led_lock = PTHREAD_MUTEX_INITIALIZER;
+static struct
+{
+    int mode, b, w, a, period_ms;
+} g_led = {0, 0, 0, 0, 4000};
+
+static void *led_fx_thread(void *argument)
+{
+    (void)argument;
+    for (;;)
+    {
+        pthread_mutex_lock(&g_led_lock);
+        const int mode = g_led.mode, b = g_led.b, w = g_led.w, a = g_led.a;
+        const int period = g_led.period_ms > 0 ? g_led.period_ms : 4000;
+        pthread_mutex_unlock(&g_led_lock);
+        if (mode == 0)
+        {
+            usleep(250000);
+            continue;
+        }
+        if (mode == 1)
+        {
+            (void)icc_led_set(b, w, a);
+            usleep(1000000); // a held colour, re-asserted each second
+        }
+        else if (mode == 2)
+        {
+            const double t = (double)(monotonic_us() / 1000u % (uint64_t)period);
+            const double half = period / 2.0;
+            const double frac = t < half ? t / half : (period - t) / half;
+            (void)icc_led_set((int)(b * frac), (int)(w * frac), (int)(a * frac));
+            usleep(40000);
+        }
+        else
+        {
+            const int step = period / 3 > 0 ? period / 3 : 1;
+            const uint64_t phase = (monotonic_us() / 1000u / (uint64_t)step) % 3;
+            (void)icc_led_set(phase == 0 ? 255 : 0, phase == 1 ? 255 : 0, phase == 2 ? 255 : 0);
+            usleep(40000);
+        }
+    }
+    return NULL;
+}
+
+static void led_set_effect(int client, int mode, int b, int w, int a, int period, const char *name)
 {
     ensure_elevated();
-    const int rc = icc_led_set(blue, white, amber);
-    if (rc == 0)
-        reply(client, "ok led blue=%d white=%d amber=%d", blue, white, amber);
+    if (mode != 0)
+    {
+        const int rc = icc_led_set(b, w, a); // probe the device and show a first frame
+        if (rc != 0)
+        {
+            reply(client, "err led: %s", strerror(-rc));
+            return;
+        }
+    }
+    pthread_mutex_lock(&g_led_lock);
+    g_led.mode = mode;
+    g_led.b = b;
+    g_led.w = w;
+    g_led.a = a;
+    if (period > 0)
+        g_led.period_ms = period;
+    pthread_mutex_unlock(&g_led_lock);
+    if (mode == 0)
+        reply(client, "ok led auto (the system controls the LED)");
     else
-        reply(client, "err led: %s", strerror(-rc));
+        reply(client, "ok led %s blue=%d white=%d amber=%d", name, b, w, a);
 }
 
 // Fan: /dev/icc_fan. One ioctl sets the manual temperature threshold (30-90 C,
@@ -1912,26 +2105,48 @@ static void fan_command(int client, const char *temp_text)
               duty[5]);
 }
 
-// Beeper: sceKernelIccSetBuzzer(pattern). Not a stub in this SDK, so resolve it
-// from a loaded libkernel at run time (PS5-Suite resolves it the same way).
-static void beeper_command(int client, int pattern)
+// Beeper: the sceKernelIccSetBuzzer* calls are not stubs in this SDK, so resolve
+// them from a loaded libkernel at run time (PS5-Suite resolves them the same
+// way). `beep` sounds a pattern (once); `mute` and `vol` are persistent.
+static int (*icc_buzzer_fn(const char *symbol))(int)
 {
-    ensure_elevated();
-    int (*set_buzzer)(int) = NULL;
     const char *const libs[] = {"libkernel_sys.sprx", "libkernel.sprx", "libkernel_web.sprx"};
-    for (size_t i = 0; i < sizeof(libs) / sizeof(libs[0]) && set_buzzer == NULL; i++)
+    for (size_t i = 0; i < sizeof(libs) / sizeof(libs[0]); i++)
     {
         void *const lib = dlopen(libs[i], RTLD_NOW | RTLD_GLOBAL);
         if (lib != NULL)
-            set_buzzer = (int (*)(int))dlsym(lib, "sceKernelIccSetBuzzer");
+        {
+            int (*fn)(int) = (int (*)(int))dlsym(lib, symbol);
+            if (fn != NULL)
+                return fn;
+        }
     }
-    if (set_buzzer == NULL)
+    return NULL;
+}
+
+static void beeper_command(int client, const char *action, int value)
+{
+    ensure_elevated();
+    const char *symbol = "sceKernelIccSetBuzzer"; // pattern 0..3, one shot
+    const char *what = "pattern";
+    if (action != NULL && strcmp(action, "mute") == 0)
     {
-        reply(client, "err beeper: sceKernelIccSetBuzzer unavailable");
+        symbol = "sceKernelIccSetBuzzerOffSetting"; // 1 = off (persistent)
+        what = "mute";
+    }
+    else if (action != NULL && strcmp(action, "vol") == 0)
+    {
+        symbol = "sceKernelIccSetBuzzerDimSetting"; // 0..2 volume (persistent)
+        what = "vol";
+    }
+    int (*fn)(int) = icc_buzzer_fn(symbol);
+    if (fn == NULL)
+    {
+        reply(client, "err beeper: %s unavailable", symbol);
         return;
     }
-    const int rc = set_buzzer(pattern);
-    reply(client, "%s beeper pattern=%d result=0x%08x", rc == 0 ? "ok" : "err", pattern,
+    const int rc = fn(value);
+    reply(client, "%s beeper %s=%d result=0x%08x", rc == 0 ? "ok" : "err", what, value,
           (uint32_t)rc);
 }
 
@@ -2582,6 +2797,15 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             module_info(client, (pid_t)atoi(pid), name);
         return 0;
     }
+    if (strcmp(command, "modules") == 0)
+    {
+        const char *const pid = strtok(NULL, " \t");
+        if (pid == NULL)
+            reply(client, "err usage: modules PID");
+        else
+            module_list(client, (pid_t)atoi(pid));
+        return 0;
+    }
     if (strcmp(command, "dlsym") == 0)
     {
         const char *const pid = strtok(NULL, " \t");
@@ -2610,6 +2834,24 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             reply(client, "err usage: uninstall TITLE_ID");
         else
             uninstall_app(client, title_id);
+        return 0;
+    }
+    if (strcmp(command, "install") == 0)
+    {
+        const char *const path = strtok(NULL, " \t");
+        if (path == NULL || path[0] != '/')
+            reply(client, "err usage: install /PATH/TO.pkg");
+        else
+            install_pkg(client, path);
+        return 0;
+    }
+    if (strcmp(command, "exec") == 0)
+    {
+        char *const rest = strtok(NULL, "");
+        if (rest == NULL)
+            reply(client, "err usage: exec /PATH [ARGS]");
+        else
+            exec_command(client, rest);
         return 0;
     }
     if (strcmp(command, "notify") == 0)
@@ -2651,15 +2893,34 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     }
     if (strcmp(command, "led") == 0)
     {
-        const char *const a = strtok(NULL, " \t");
-        const char *const b = strtok(NULL, " \t");
-        const char *const c = strtok(NULL, " \t");
-        if (a != NULL && c == NULL && strcmp(a, "off") == 0)
-            led_command(client, 0, 0, 0);
-        else if (a == NULL || b == NULL || c == NULL)
-            reply(client, "err usage: led BLUE WHITE AMBER (each 0..255 or -1), or led off");
+        const char *const a0 = strtok(NULL, " \t");
+        if (a0 != NULL && strcmp(a0, "auto") == 0)
+            led_set_effect(client, 0, 0, 0, 0, 0, "auto");
+        else if (a0 != NULL && strcmp(a0, "off") == 0)
+            led_set_effect(client, 1, 0, 0, 0, 0, "off");
+        else if (a0 != NULL && (strcmp(a0, "breathe") == 0 || strcmp(a0, "chase") == 0))
+        {
+            const int chase = strcmp(a0, "chase") == 0;
+            const char *const b = chase ? NULL : strtok(NULL, " \t");
+            const char *const w = chase ? NULL : strtok(NULL, " \t");
+            const char *const m = chase ? NULL : strtok(NULL, " \t");
+            const char *const period = strtok(NULL, " \t");
+            if (!chase && (b == NULL || w == NULL || m == NULL))
+                reply(client, "err usage: led breathe BLUE WHITE AMBER [MS]");
+            else
+                led_set_effect(client, chase ? 3 : 2, chase ? 255 : atoi(b), chase ? 255 : atoi(w),
+                               chase ? 255 : atoi(m), period != NULL ? atoi(period) : 0, a0);
+        }
         else
-            led_command(client, atoi(a), atoi(b), atoi(c));
+        {
+            const char *const b = strtok(NULL, " \t");
+            const char *const c = strtok(NULL, " \t");
+            if (a0 == NULL || b == NULL || c == NULL)
+                reply(client,
+                      "err usage: led BLUE WHITE AMBER | off | auto | breathe B W A [MS] | chase [MS]");
+            else
+                led_set_effect(client, 1, atoi(a0), atoi(b), atoi(c), 0, "static");
+        }
         return 0;
     }
     if (strcmp(command, "fan") == 0)
@@ -2675,8 +2936,17 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     }
     if (strcmp(command, "beeper") == 0)
     {
-        const char *const pattern = strtok(NULL, " \t");
-        beeper_command(client, pattern != NULL ? atoi(pattern) : 1);
+        const char *const sub = strtok(NULL, " \t");
+        if (sub != NULL && (strcmp(sub, "mute") == 0 || strcmp(sub, "vol") == 0))
+        {
+            const char *const value = strtok(NULL, " \t");
+            if (value == NULL)
+                reply(client, "err usage: beeper mute 0|1 | beeper vol 0..2 | beeper [PATTERN]");
+            else
+                beeper_command(client, sub, atoi(value));
+        }
+        else
+            beeper_command(client, NULL, sub != NULL ? atoi(sub) : 1);
         return 0;
     }
     if (strcmp(command, "kill") == 0)
@@ -2953,6 +3223,28 @@ static int serve_client(int client)
     return handle_command(client, line, body, body_len);
 }
 
+// Open a bound, listening TCP socket on the command port, or -1. Used at start
+// and to rebind after the network drops across rest/resume.
+static int open_listener(unsigned port)
+{
+    const int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (fd < 0)
+        return -1;
+    int reuse = 1;
+    (void)setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_ANY);
+    address.sin_port = htons((uint16_t)port);
+    if (bind(fd, (struct sockaddr *)&address, sizeof(address)) != 0 || listen(fd, 4) != 0)
+    {
+        close(fd);
+        return -1;
+    }
+    return fd;
+}
+
 int main(int argc, char *argv[])
 {
     unsigned port = PS5LOOP_PORT;
@@ -2967,24 +3259,11 @@ int main(int argc, char *argv[])
     log_line("ps5loop: starting, port %u, pid %d, user service 0x%08x", port, (int)getpid(),
              (uint32_t)user_init);
 
-    const int server = socket(AF_INET, SOCK_STREAM, 0);
+    int server = open_listener(port);
     if (server < 0)
-    {
-        log_line("ps5loop: socket: %s", strerror(errno));
-        return 1;
-    }
-    int reuse = 1;
-    (void)setsockopt(server, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
-    struct sockaddr_in address;
-    memset(&address, 0, sizeof(address));
-    address.sin_family = AF_INET;
-    address.sin_addr.s_addr = htonl(INADDR_ANY);
-    address.sin_port = htons((uint16_t)port);
-    if (bind(server, (struct sockaddr *)&address, sizeof(address)) != 0 || listen(server, 4) != 0)
     {
         // A second copy finds the port taken and leaves the first one alone.
         log_line("ps5loop: bind or listen failed: %s", strerror(errno));
-        close(server);
         return 1;
     }
     pthread_t inserter;
@@ -2999,6 +3278,11 @@ int main(int argc, char *argv[])
         pthread_detach(discoverer);
     else
         log_line("ps5loop: no discovery beacon: %s", strerror(errno));
+    pthread_t led_animator;
+    if (pthread_create(&led_animator, NULL, led_fx_thread, NULL) == 0)
+        pthread_detach(led_animator);
+    else
+        log_line("ps5loop: no led thread: %s", strerror(errno));
     log_line("ps5loop: listening");
     for (;;)
     {
@@ -3007,8 +3291,18 @@ int main(int argc, char *argv[])
         {
             if (errno == EINTR)
                 continue;
-            log_line("ps5loop: accept failed: %s", strerror(errno));
-            break;
+            // The network can drop across rest/resume; rebind and keep serving
+            // instead of leaving, so the payload survives standby.
+            log_line("ps5loop: accept failed: %s; rebinding", strerror(errno));
+            close(server);
+            server = -1;
+            while (server < 0)
+            {
+                usleep(1000000);
+                server = open_listener(port);
+            }
+            log_line("ps5loop: re-listening");
+            continue;
         }
         const int leaving = serve_client(client);
         close(client);

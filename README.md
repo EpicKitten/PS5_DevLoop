@@ -105,16 +105,19 @@ disable that first.
 | `open-url URL` | open a URL in the console's web browser |
 | `launch TITLE_ID` | launch a registered title |
 | `close-app [APP_ID]` | close a running app (id from `ps`, else the foreground one) |
+| `install /PATH.pkg` | install a `.pkg` already on the console |
+| `exec /PATH [ARGS]` | run a console binary and send back its output and exit code |
+| `wake` | wake the console from standby (UDP packet; needs `PS5_WAKE_CREDENTIAL`) |
 | `locate-title` | the foreground app's ids right now (app id, pid, title id, command) |
-| `module PID NAME` / `dlsym PID NAME SYM` | where a module is mapped in a process, and a symbol's address in it |
+| `module PID NAME` / `modules PID` / `dlsym PID NAME SYM` | a named module's mapping, every module in a process, or a symbol's address |
 | `rest` / `reboot` / `power-off` | rest mode, reboot, or power off |
 | `uninstall TITLE_ID` | uninstall a title |
 | `notify TYPE MESSAGE` | an on-screen message: `toast` (banner) or `flyout` (card) |
 | `hwinfo` | model, serial, CPU temp, all 64 SoC sensors (incl. the hottest), CPU clock |
 | `df` | free space per mounted volume |
-| `led BLUE WHITE AMBER` / `led off` | set the console indicator LED (levels 0..255), via `/dev/icc_indicator` |
+| `led BWA` / `off` / `auto` / `breathe B W A [MS]` / `chase [MS]` | the console indicator LED (static, off, system-controlled, or an animated effect), via `/dev/icc_indicator` |
 | `fan [TEMP]` | read the fan duty, or set the manual threshold (30..90 °C), via `/dev/icc_fan` |
-| `beeper [PATTERN]` | beep the console (`sceKernelIccSetBuzzer`, pattern 0..3) |
+| `beeper [PATTERN]` / `mute 0\|1` / `vol 0..2` | beep the console, or set its mute / volume (`sceKernelIccSetBuzzer*`) |
 | `kill PID` | end a process (not just a registered app) |
 | `peek PID ADDR LEN` / `poke PID ADDR HEX` | read / write a process's memory (writes are read back and verified) |
 | `scan PID ADDR LEN W VALUE` | find a `W`-byte integer (`W` = 1/2/4/8) in a span of a process's memory |
@@ -128,11 +131,15 @@ disable that first.
 
 Verified on firmware 12.20: `ps`, `ls`/`get`/`put`/`rm`/`mv` (a round trip is
 byte-for-byte), `hash` (matches `sha256sum` for a 1 MB file and an empty file),
-`open-url`, `close-app`, `locate-title`, `module`/`dlsym`, `hwinfo` (all 64 SoC
-sensors answer), `df`, `led`/`fan`/`beeper` (ICC ioctls return success),
+`open-url`, `close-app`, `locate-title`, `module`/`modules`/`dlsym`, `hwinfo`
+(all 64 SoC sensors answer), `df`, `led`/`fan`/`beeper` (ICC ioctls/calls return
+success, including the `breathe`/`chase`/`auto` effects and beeper `mute`/`vol`),
 `scan`/`scan-aob` (hit a known probe), `kern-read`/`kern-write` and `setting-set`
 (verified), `notify`, `peek`, `http`, the UDP beacon and `klog-stream`, and the
-console-hosted dashboard (`GET /`, `GET /api/hwinfo`).
+console-hosted dashboard (`GET /`, `GET /api/hwinfo`). `install` and `exec` are
+wired and fail gracefully on a missing target (a positive run needs a real
+`.pkg` / binary); `wake` and rest-mode survival are host/standby paths not
+exercised in this session.
 Notes and limits:
 
 - **`peek`** reads a process's memory; **`poke`** writes it. Writing the
