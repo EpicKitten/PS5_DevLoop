@@ -106,9 +106,21 @@ disable that first.
 | `close-app [APP_ID]` | close a running app (id from `ps`, else the foreground one) |
 | `rest` / `reboot` / `power-off` | rest mode, reboot, or power off |
 | `uninstall TITLE_ID` | uninstall a title |
+| `notify MESSAGE` | show a toast on the TV |
+| `hwinfo` | model, serial, CPU/SoC temperatures, CPU clock |
+| `df` | free space per mounted volume |
+| `kill PID` | end a process (not just a registered app) |
+| `peek PID ADDR LEN` / `poke PID ADDR HEX` | read / write a process's memory |
+| `http URL` | fetch an `http://` URL (saved under `downloads/`) |
 
 Verified on firmware 12.20: `ps`, `ls`/`get`/`put`/`rm`/`mv` (a round trip is
-byte-for-byte), `open-url`, and `close-app`. Notes and limits:
+byte-for-byte), `open-url`, `close-app`, `hwinfo`, `df`, `notify`, `peek`, and
+`http`. Notes and limits:
+
+- **`peek`** reads a process's memory; **`poke`** writes it. Writing the
+  payload's own process is refused by the kernel's self-write rule — `poke`
+  targets another process (a game), which is the point; verify it against a
+  running title. `ps` gives the pids. `plan.md` tracks what is next.
 
 - **`launch`** uses `sceSystemServiceLaunchApp`, which takes titles registered in
   the shell's app database. Homebrew launched by a loader or a launcher (the
