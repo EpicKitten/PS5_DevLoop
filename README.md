@@ -111,7 +111,12 @@ disable that first.
 | `hwinfo` | model, serial, CPU temp, all 64 SoC sensors (incl. the hottest), CPU clock |
 | `df` | free space per mounted volume |
 | `kill PID` | end a process (not just a registered app) |
-| `peek PID ADDR LEN` / `poke PID ADDR HEX` | read / write a process's memory |
+| `peek PID ADDR LEN` / `poke PID ADDR HEX` | read / write a process's memory (writes are read back and verified) |
+| `scan PID ADDR LEN W VALUE` | find a `W`-byte integer (`W` = 1/2/4/8) in a span of a process's memory |
+| `scan-aob PID ADDR LEN PATTERN` | find a byte pattern (`??` = wildcard) in a span |
+| `kern-read ADDR LEN` / `kern-write ADDR HEX` | read / write kernel memory by absolute address (writes verified) |
+| `klog-stream [MS]` | stream the kernel log live until you disconnect |
+| `discover [--timeout S]` | find consoles on the LAN by UDP broadcast to the command port |
 | `http URL` | fetch an `http://` URL (saved under `downloads/`) |
 | `settings` | read the system registry (settings) as JSON |
 

@@ -50,8 +50,14 @@
  *   GET / , GET /api/hwinfo   a browser gets the live dashboard, hosted here
  *   kill PID                  end a process
  *   peek PID ADDR LEN         read a process's memory
- *   poke PID ADDR HEX         write a process's memory
+ *   poke PID ADDR HEX         write a process's memory (read back and verified)
+ *   scan PID ADDR LEN W VALUE find a W-byte integer in a span (W is 1|2|4|8)
+ *   scan-aob PID ADDR LEN PAT find a byte pattern in a span (?? = wildcard)
+ *   kern-read ADDR LEN        read kernel memory (absolute address)
+ *   kern-write ADDR HEX       write kernel memory (read back and verified)
+ *   klog-stream [MS]          stream the kernel log until you disconnect
  *   http http://URL           fetch a URL and send the response
+ *   (a UDP probe to the command port is answered with an identifier: discovery)
  *   settings                  read the system registry as JSON
  *   quit                      remove the pad and leave the console
  *
@@ -332,6 +338,44 @@ static void *insert_thread(void *argument)
         }
         pthread_mutex_unlock(&g_pad.lock);
         usleep(PS5LOOP_INSERT_INTERVAL_US);
+    }
+    return NULL;
+}
+
+// Discovery beacon: answer a UDP probe on the command port so a client can find
+// the console on the LAN without its address hardcoded. It replies with an
+// identifier, never anything that needs the sender to be trusted.
+static void *discover_thread(void *argument)
+{
+    (void)argument;
+    const int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0)
+        return NULL;
+    int reuse = 1;
+    (void)setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    struct sockaddr_in address;
+    memset(&address, 0, sizeof(address));
+    address.sin_family = AF_INET;
+    address.sin_addr.s_addr = htonl(INADDR_ANY);
+    address.sin_port = htons(PS5LOOP_PORT);
+    if (bind(sock, (struct sockaddr *)&address, sizeof(address)) != 0)
+    {
+        close(sock);
+        return NULL;
+    }
+    for (;;)
+    {
+        char probe[64];
+        struct sockaddr_in from;
+        socklen_t fromlen = sizeof(from);
+        const ssize_t n = recvfrom(sock, probe, sizeof(probe), 0, (struct sockaddr *)&from, &fromlen);
+        if (n < 0)
+            continue;
+        char answer[96];
+        const int len = snprintf(answer, sizeof(answer), "ps5loop fw=0x%08x port=%d pid=%d",
+                                 kernel_get_fw_version(), PS5LOOP_PORT, (int)getpid());
+        if (len > 0)
+            (void)sendto(sock, answer, (size_t)len, 0, (struct sockaddr *)&from, fromlen);
     }
     return NULL;
 }
@@ -1725,12 +1769,220 @@ static void poke(int client, pid_t pid, intptr_t addr, const char *hex)
         const char byte[3] = {hex[i * 2], hex[i * 2 + 1], '\0'};
         buffer[i] = (char)strtoul(byte, NULL, 16);
     }
-    const int result = mdbg_copyin(pid, buffer, addr, len);
-    free(buffer);
-    if (result != 0)
+    if (mdbg_copyin(pid, buffer, addr, len) != 0)
+    {
+        free(buffer);
         reply(client, "err poke pid=%d addr=0x%lx: %s", (int)pid, (long)addr, strerror(errno));
+        return;
+    }
+    // truthful write: read it back and confirm the bytes took.
+    char *const check = malloc(len);
+    bool verified = false;
+    if (check != NULL && mdbg_copyout(pid, addr, check, len) == 0)
+        verified = memcmp(check, buffer, len) == 0;
+    free(check);
+    free(buffer);
+    reply(client, "ok poke %zu bytes pid=%d addr=0x%lx verify=%s", len, (int)pid, (long)addr,
+          verified ? "ok" : "mismatch");
+}
+
+// Read a span of a process's memory into a fresh buffer, in chunks the debugger
+// accepts. Returns NULL on allocation failure or an unreadable span.
+static char *mem_read_span(pid_t pid, intptr_t addr, size_t len)
+{
+    char *const buffer = malloc(len);
+    if (buffer == NULL)
+        return NULL;
+    for (size_t done = 0; done < len;)
+    {
+        const size_t step = len - done < 0x10000 ? len - done : 0x10000;
+        if (mdbg_copyout(pid, addr + (intptr_t)done, buffer + done, step) != 0)
+        {
+            free(buffer);
+            return NULL;
+        }
+        done += step;
+    }
+    return buffer;
+}
+
+#define SCAN_MAX_SPAN (16u << 20) // 16 MB per scan, to bound memory and time
+#define SCAN_MAX_HITS 4096        // report at most this many matches
+
+// scan: find a little-endian integer of WIDTH bytes equal to VALUE in a span of
+// a process's memory, stepping by WIDTH. Answers a text list of hex addresses.
+static void mem_scan(int client, pid_t pid, intptr_t addr, size_t len, int width, uint64_t value)
+{
+    if (width != 1 && width != 2 && width != 4 && width != 8)
+    {
+        reply(client, "err scan: width is 1, 2, 4 or 8");
+        return;
+    }
+    if (len == 0 || len > SCAN_MAX_SPAN)
+    {
+        reply(client, "err scan: length 1..%u", SCAN_MAX_SPAN);
+        return;
+    }
+    char *const buffer = mem_read_span(pid, addr, len);
+    if (buffer == NULL)
+    {
+        reply(client, "err scan pid=%d addr=0x%lx: %s", (int)pid, (long)addr, strerror(errno));
+        return;
+    }
+    const uint64_t mask = width == 8 ? ~0ull : ((1ull << (width * 8)) - 1);
+    size_t cap = 1u << 16, used = 0, hits = 0;
+    char *text = malloc(cap);
+    for (size_t off = 0; text != NULL && off + (size_t)width <= len; off += (size_t)width)
+    {
+        uint64_t here = 0;
+        memcpy(&here, buffer + off, (size_t)width);
+        if ((here & mask) != (value & mask))
+            continue;
+        if (hits < SCAN_MAX_HITS)
+            text = text_append(text, &cap, &used, "0x%lx\n", (long)(addr + (intptr_t)off));
+        hits++;
+    }
+    free(buffer);
+    if (text == NULL)
+        reply(client, "err scan: out of memory");
     else
-        reply(client, "ok poke %zu bytes pid=%d addr=0x%lx", len, (int)pid, (long)addr);
+    {
+        char header[96];
+        snprintf(header, sizeof(header), "scan hits=%zu shown=%zu", hits,
+                 hits < SCAN_MAX_HITS ? hits : (size_t)SCAN_MAX_HITS);
+        send_bytes(client, header, text, used);
+    }
+    free(text);
+}
+
+// scan-aob: find a byte pattern in a span. The pattern is hex byte pairs; "??"
+// is a wildcard. Answers a text list of hex addresses.
+static void mem_scan_aob(int client, pid_t pid, intptr_t addr, size_t len, const char *pattern)
+{
+    if (len == 0 || len > SCAN_MAX_SPAN)
+    {
+        reply(client, "err scan-aob: length 1..%u", SCAN_MAX_SPAN);
+        return;
+    }
+    const size_t plen = strlen(pattern) / 2;
+    if (plen == 0 || strlen(pattern) % 2 != 0 || plen > 256)
+    {
+        reply(client, "err scan-aob: pattern is 1..256 hex byte pairs (?? = wildcard)");
+        return;
+    }
+    unsigned char bytes[256];
+    unsigned char wild[256];
+    for (size_t i = 0; i < plen; i++)
+    {
+        const char hi = pattern[i * 2], lo = pattern[i * 2 + 1];
+        if (hi == '?' && lo == '?')
+        {
+            wild[i] = 1;
+            bytes[i] = 0;
+        }
+        else
+        {
+            const char pair[3] = {hi, lo, '\0'};
+            char *end = NULL;
+            bytes[i] = (unsigned char)strtoul(pair, &end, 16);
+            wild[i] = 0;
+            if (end != pair + 2)
+            {
+                reply(client, "err scan-aob: bad hex at byte %zu", i);
+                return;
+            }
+        }
+    }
+    char *const buffer = mem_read_span(pid, addr, len);
+    if (buffer == NULL)
+    {
+        reply(client, "err scan-aob pid=%d addr=0x%lx: %s", (int)pid, (long)addr, strerror(errno));
+        return;
+    }
+    size_t cap = 1u << 16, used = 0, hits = 0;
+    char *text = malloc(cap);
+    const unsigned char *const data = (const unsigned char *)buffer;
+    for (size_t off = 0; text != NULL && off + plen <= len; off++)
+    {
+        size_t i = 0;
+        for (; i < plen; i++)
+            if (!wild[i] && data[off + i] != bytes[i])
+                break;
+        if (i != plen)
+            continue;
+        if (hits < SCAN_MAX_HITS)
+            text = text_append(text, &cap, &used, "0x%lx\n", (long)(addr + (intptr_t)off));
+        hits++;
+    }
+    free(buffer);
+    if (text == NULL)
+        reply(client, "err scan-aob: out of memory");
+    else
+    {
+        char header[96];
+        snprintf(header, sizeof(header), "scan-aob hits=%zu shown=%zu", hits,
+                 hits < SCAN_MAX_HITS ? hits : (size_t)SCAN_MAX_HITS);
+        send_bytes(client, header, text, used);
+    }
+    free(text);
+}
+
+// kern-read / kern-write: raw kernel memory, by absolute kernel address. The
+// kernel R/W primitives come from the loader's exploit (ps5/kernel.h).
+static void kern_read(int client, intptr_t kaddr, size_t len)
+{
+    if (len == 0 || len > (1u << 20))
+    {
+        reply(client, "err kern-read: length 1..1048576");
+        return;
+    }
+    char *const buffer = malloc(len);
+    if (buffer == NULL)
+    {
+        reply(client, "err kern-read: out of memory");
+        return;
+    }
+    if (kernel_copyout(kaddr, buffer, len) != 0)
+        reply(client, "err kern-read addr=0x%lx: %s", (long)kaddr, strerror(errno));
+    else
+        send_bytes(client, "kern-read", buffer, len);
+    free(buffer);
+}
+
+static void kern_write(int client, intptr_t kaddr, const char *hex)
+{
+    const size_t hexlen = strlen(hex);
+    const size_t len = hexlen / 2;
+    if (len == 0 || hexlen % 2 != 0 || len > (1u << 20))
+    {
+        reply(client, "err kern-write: give an even-length hex string");
+        return;
+    }
+    char *const buffer = malloc(len);
+    if (buffer == NULL)
+    {
+        reply(client, "err kern-write: out of memory");
+        return;
+    }
+    for (size_t i = 0; i < len; i++)
+    {
+        const char byte[3] = {hex[i * 2], hex[i * 2 + 1], '\0'};
+        buffer[i] = (char)strtoul(byte, NULL, 16);
+    }
+    if (kernel_copyin(buffer, kaddr, len) != 0)
+    {
+        free(buffer);
+        reply(client, "err kern-write addr=0x%lx: %s", (long)kaddr, strerror(errno));
+        return;
+    }
+    char *const check = malloc(len);
+    bool verified = false;
+    if (check != NULL && kernel_copyout(kaddr, check, len) == 0)
+        verified = memcmp(check, buffer, len) == 0;
+    free(check);
+    free(buffer);
+    reply(client, "ok kern-write %zu bytes addr=0x%lx verify=%s", len, (long)kaddr,
+          verified ? "ok" : "mismatch");
 }
 
 // http: a plain HTTP/1.1 GET over a raw socket, for http:// URLs.
@@ -1882,9 +2134,9 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     }
     if (strcmp(command, "ping") == 0)
     {
-        reply(client, "ok ps5loop 1 pid=%d fw=0x%08x pad=%s probe=0x%llx", (int)getpid(),
+        reply(client, "ok ps5loop 1 pid=%d fw=0x%08x pad=%s probe=0x%llx kproc=0x%lx", (int)getpid(),
               kernel_get_fw_version(), g_pad.open ? "open" : "closed",
-              (unsigned long long)(uintptr_t)g_probe);
+              (unsigned long long)(uintptr_t)g_probe, (long)kernel_get_proc(getpid()));
         return 0;
     }
     if (strcmp(command, "quit") == 0)
@@ -2152,6 +2404,81 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             poke(client, (pid_t)atoi(pid), (intptr_t)strtoull(addr, NULL, 0), hex);
         return 0;
     }
+    if (strcmp(command, "scan") == 0)
+    {
+        const char *const pid = strtok(NULL, " \t");
+        const char *const addr = strtok(NULL, " \t");
+        const char *const len = strtok(NULL, " \t");
+        const char *const width = strtok(NULL, " \t");
+        const char *const value = strtok(NULL, " \t");
+        if (pid == NULL || addr == NULL || len == NULL || width == NULL || value == NULL)
+            reply(client, "err usage: scan PID ADDR LEN WIDTH VALUE (width 1|2|4|8)");
+        else
+            mem_scan(client, (pid_t)atoi(pid), (intptr_t)strtoull(addr, NULL, 0),
+                     (size_t)strtoull(len, NULL, 0), atoi(width), strtoull(value, NULL, 0));
+        return 0;
+    }
+    if (strcmp(command, "scan-aob") == 0)
+    {
+        const char *const pid = strtok(NULL, " \t");
+        const char *const addr = strtok(NULL, " \t");
+        const char *const len = strtok(NULL, " \t");
+        const char *const pattern = strtok(NULL, " \t");
+        if (pid == NULL || addr == NULL || len == NULL || pattern == NULL)
+            reply(client, "err usage: scan-aob PID ADDR LEN PATTERN (hex, ?? = wildcard)");
+        else
+            mem_scan_aob(client, (pid_t)atoi(pid), (intptr_t)strtoull(addr, NULL, 0),
+                         (size_t)strtoull(len, NULL, 0), pattern);
+        return 0;
+    }
+    if (strcmp(command, "kern-read") == 0)
+    {
+        const char *const addr = strtok(NULL, " \t");
+        const char *const len = strtok(NULL, " \t");
+        if (addr == NULL || len == NULL)
+            reply(client, "err usage: kern-read ADDR LEN");
+        else
+            kern_read(client, (intptr_t)strtoull(addr, NULL, 0), (size_t)strtoull(len, NULL, 0));
+        return 0;
+    }
+    if (strcmp(command, "kern-write") == 0)
+    {
+        const char *const addr = strtok(NULL, " \t");
+        const char *const hex = strtok(NULL, " \t");
+        if (addr == NULL || hex == NULL)
+            reply(client, "err usage: kern-write ADDR HEX");
+        else
+            kern_write(client, (intptr_t)strtoull(addr, NULL, 0), hex);
+        return 0;
+    }
+    if (strcmp(command, "klog-stream") == 0)
+    {
+        const char *const ms = strtok(NULL, " \t");
+        long cap_ms = ms != NULL ? atol(ms) : 0;
+        if (cap_ms < 0 || cap_ms > 600000)
+            cap_ms = 600000;
+        const int log = klog_open();
+        if (log < 0)
+        {
+            reply(client, "err klog: %s", strerror(errno));
+            return 0;
+        }
+        reply(client, "ok klog-stream (until you disconnect)");
+        char buffer[8192];
+        const uint64_t deadline = cap_ms != 0 ? monotonic_us() + (uint64_t)cap_ms * 1000u : 0;
+        for (;;)
+        {
+            const ssize_t bytes = klog_read(log, buffer, sizeof(buffer), 200);
+            if (bytes < 0)
+                break;
+            if (bytes > 0 && send(client, buffer, (size_t)bytes, 0) <= 0)
+                break;
+            if (deadline != 0 && monotonic_us() > deadline)
+                break;
+        }
+        close(log);
+        return 0;
+    }
     if (strcmp(command, "http") == 0)
     {
         const char *const url = strtok(NULL, " \t");
@@ -2360,6 +2687,11 @@ int main(int argc, char *argv[])
         close(server);
         return 1;
     }
+    pthread_t discoverer;
+    if (pthread_create(&discoverer, NULL, discover_thread, NULL) == 0)
+        pthread_detach(discoverer);
+    else
+        log_line("ps5loop: no discovery beacon: %s", strerror(errno));
     log_line("ps5loop: listening");
     for (;;)
     {

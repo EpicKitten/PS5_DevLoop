@@ -45,7 +45,13 @@ Commands:
   df                    free space per mounted volume
   kill PID              end a process by pid
   peek PID ADDR LEN     read a process's memory (prints hex + ascii)
-  poke PID ADDR HEX     write a hex string into a process's memory
+  poke PID ADDR HEX     write a hex string into a process's memory (verified)
+  scan PID ADDR LEN W V find a W-byte integer V in a span (W is 1, 2, 4 or 8)
+  scan-aob PID ADDR LEN PATTERN   find a byte pattern in a span (?? = wildcard)
+  kern-read ADDR LEN    read kernel memory at an absolute address
+  kern-write ADDR HEX   write kernel memory at an absolute address (verified)
+  klog-stream [MS]      stream the kernel log live (Ctrl+C to stop)
+  discover [--timeout S]  find consoles on this LAN by UDP broadcast
   http URL              fetch an http:// URL (saved under downloads/)
   settings [FILE]       read the system registry as JSON (saved under downloads/)
 
@@ -307,6 +313,61 @@ def fetch_text(line):
     return 0
 
 
+def klog_stream(ms):
+    """Stream the kernel log until the console closes it or you press Ctrl+C."""
+    line = "klog-stream" + (f" {ms}" if ms else "")
+    try:
+        conn = socket.create_connection((console_host(), PORT), timeout=10)
+    except OSError as error:
+        raise SystemExit(f"ps5loop: the payload did not answer ({error})") from None
+    with conn:
+        conn.sendall((line + "\n").encode())
+        buf = b""
+        while b"\n" not in buf:
+            chunk = conn.recv(4096)
+            if not chunk:
+                return say("(no reply)")
+            buf += chunk
+        first, _, rest = buf.partition(b"\n")
+        answer = first.decode("utf-8", "replace")
+        if not answer.startswith("ok"):
+            return say(answer)
+        print(answer)
+        sys.stdout.buffer.write(rest)
+        sys.stdout.flush()
+        try:
+            while True:
+                chunk = conn.recv(65536)
+                if not chunk:
+                    break
+                sys.stdout.buffer.write(chunk)
+                sys.stdout.flush()
+        except KeyboardInterrupt:
+            pass
+    return 0
+
+
+def discover(timeout):
+    """Broadcast a UDP probe and list the consoles that answer, on this LAN."""
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+    sock.settimeout(timeout)
+    sock.sendto(b"ps5loop?", ("255.255.255.255", PORT))
+    found, end = [], time.time() + timeout
+    while time.time() < end:
+        try:
+            data, addr = sock.recvfrom(256)
+        except socket.timeout:
+            break
+        found.append((addr[0], data.decode("utf-8", "replace")))
+    sock.close()
+    for ip, info in found:
+        print(f"{ip}  {info}")
+    if not found:
+        print("no consoles answered")
+    return 0 if found else 1
+
+
 def get_file(remote, local):
     """Download a console file to a local path (default: downloads/<name>)."""
     answer, data = command(f"get {remote}", timeout=300, payload=True)
@@ -415,6 +476,26 @@ def main():
     poking.add_argument("pid")
     poking.add_argument("addr")
     poking.add_argument("hex", help="bytes as a hex string, e.g. deadbeef")
+    scanning = commands.add_parser("scan")
+    scanning.add_argument("pid")
+    scanning.add_argument("addr")
+    scanning.add_argument("len")
+    scanning.add_argument("width", help="integer width in bytes: 1, 2, 4 or 8")
+    scanning.add_argument("value", help="hex (0x...) or decimal")
+    aob = commands.add_parser("scan-aob")
+    aob.add_argument("pid")
+    aob.add_argument("addr")
+    aob.add_argument("len")
+    aob.add_argument("pattern", help="hex byte pairs, ?? for a wildcard")
+    kread = commands.add_parser("kern-read")
+    kread.add_argument("addr", help="absolute kernel address, hex")
+    kread.add_argument("len")
+    kwrite = commands.add_parser("kern-write")
+    kwrite.add_argument("addr", help="absolute kernel address, hex")
+    kwrite.add_argument("hex", help="bytes as a hex string")
+    commands.add_parser("klog-stream").add_argument("ms", nargs="?",
+                                                   help="optional cap in ms; default until you quit")
+    commands.add_parser("discover").add_argument("--timeout", type=float, default=2.0)
     commands.add_parser("http").add_argument("url", help="an http:// URL")
     commands.add_parser("settings").add_argument("file", nargs="?",
                                                 help="where to save the JSON (default downloads/)")
@@ -491,6 +572,29 @@ def main():
         return 0
     if args.command == "poke":
         return say(command(f"poke {args.pid} {args.addr} {args.hex}")[0])
+    if args.command in ("scan", "scan-aob"):
+        line = (f"scan {args.pid} {args.addr} {args.len} {args.width} {args.value}"
+                if args.command == "scan"
+                else f"scan-aob {args.pid} {args.addr} {args.len} {args.pattern}")
+        answer, data = command(line, timeout=120, payload=True)
+        if not answer.startswith("ok file"):
+            return say(answer)
+        print(answer.split("path=", 1)[1] if "path=" in answer else args.command)
+        sys.stdout.write(data.decode("utf-8", "replace"))
+        return 0
+    if args.command == "kern-read":
+        answer, data = command(f"kern-read {args.addr} {args.len}", payload=True)
+        if not answer.startswith("ok file"):
+            return say(answer)
+        print(data.hex())
+        print("ascii:", "".join(chr(b) if 32 <= b < 127 else "." for b in data))
+        return 0
+    if args.command == "kern-write":
+        return say(command(f"kern-write {args.addr} {args.hex}")[0])
+    if args.command == "klog-stream":
+        return klog_stream(args.ms)
+    if args.command == "discover":
+        return discover(args.timeout)
     if args.command == "settings":
         answer, data = command("settings", timeout=120, payload=True)
         if not answer.startswith("ok file"):
