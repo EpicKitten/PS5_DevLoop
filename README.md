@@ -6,6 +6,11 @@
 **Let an AI agent, or a script, drive a jailbroken PS5 by itself: press buttons,
 see the screen, repeat.**
 
+> [!NOTE]
+> **This is 100% vibecoded.** The code and the documentation were written by an
+> AI agent, checked against a real console rather than reviewed line by line.
+> Read it with that in mind before you run it on yours.
+
 Porting homebrew to the PS5 has had a gap in the middle of every loop. A machine
 can build a title, deploy it, launch it and read its log, but it cannot press
 Cross on the menu, and it cannot see that the screen is black. So a person sits
