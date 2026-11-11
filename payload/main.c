@@ -80,6 +80,7 @@
  *   klog-stream [MS]          stream the kernel log until you disconnect
  *   http http://URL           fetch a URL and send the response
  *   (a UDP probe to the command port is answered with an identifier: discovery)
+ *   (at start, a flyout shows the dashboard's address, http://<console>:<port>/)
  *   settings                  read the system registry as JSON
  *   setting-set REGID VALUE   write one integer setting (read back and verified)
  *   quit                      remove the pad and leave the console
@@ -1922,16 +1923,14 @@ static void json_escape(char *out, size_t size, const char *in)
     out[j] = '\0';
 }
 
-static void notify_flyout(int client, const char *message)
+// Send a flyout card; returns sceNotificationSend's result (-1 on out of memory).
+static int32_t flyout_send(const char *message)
 {
     char safe[320];
     json_escape(safe, sizeof(safe), message);
     char *const json = malloc(2048);
     if (json == NULL)
-    {
-        reply(client, "err notify: out of memory");
-        return;
-    }
+        return -1;
     snprintf(json, 2048,
              "{\"rawData\":{\"viewTemplateType\":\"InteractiveToastTemplateB\","
              "\"channelType\":\"Downloads\",\"useCaseId\":\"IDC\",\"toastOverwriteType\":\"No\","
@@ -1944,7 +1943,63 @@ static void notify_flyout(int client, const char *message)
              safe, safe, (unsigned)(monotonic_us() & 0x7fffffffu));
     const int32_t result = sceNotificationSend(0xFE, true, json);
     free(json);
-    reply(client, "%s notify flyout result=0x%08x", result == 0 ? "ok" : "err", (uint32_t)result);
+    return result;
+}
+
+static void notify_flyout(int client, const char *message)
+{
+    const int32_t result = flyout_send(message);
+    if (result == -1)
+        reply(client, "err notify: out of memory");
+    else
+        reply(client, "%s notify flyout result=0x%08x", result == 0 ? "ok" : "err", (uint32_t)result);
+}
+
+// The console's LAN address, as the routing table picks it: connecting a UDP
+// socket sends nothing, it only chooses the source address getsockname reports.
+// False when there is no route yet (the network is still coming up).
+static bool local_address(char *out, size_t size)
+{
+    const int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0)
+        return false;
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(53);
+    to.sin_addr.s_addr = htonl(0xC0000201u); // 192.0.2.1 (TEST-NET-1): any routed address does
+    struct sockaddr_in me;
+    socklen_t length = sizeof(me);
+    memset(&me, 0, sizeof(me));
+    const bool ok = connect(sock, (struct sockaddr *)&to, sizeof(to)) == 0 &&
+                    getsockname(sock, (struct sockaddr *)&me, &length) == 0 &&
+                    me.sin_addr.s_addr != htonl(INADDR_ANY) &&
+                    me.sin_addr.s_addr != htonl(INADDR_LOOPBACK) &&
+                    inet_ntop(AF_INET, &me.sin_addr, out, (socklen_t)size) != NULL;
+    close(sock);
+    return ok;
+}
+
+// At start, a flyout with the dashboard's address, so a browser can be pointed at
+// it without looking anything up. A payload loaded at boot may run before the
+// network is up, so this waits (up to a minute) for an address before giving up
+// on it and showing the port alone.
+static void *announce_thread(void *argument)
+{
+    const unsigned port = (unsigned)(uintptr_t)argument;
+    char address[INET_ADDRSTRLEN] = "";
+    for (int tries = 0; tries < 60 && !local_address(address, sizeof(address)); tries++)
+        usleep(1000000);
+    ensure_elevated();
+    char message[160];
+    if (address[0] != '\0')
+        snprintf(message, sizeof(message), "DevLoop dashboard: http://%s:%u/", address, port);
+    else
+        snprintf(message, sizeof(message), "DevLoop is running: dashboard on port %u", port);
+    const int32_t result = flyout_send(message);
+    log_line("ps5loop: announced %s (0x%08x)", address[0] != '\0' ? address : "no address",
+             (uint32_t)result);
+    return NULL;
 }
 
 static void notify(int client, const char *type, const char *message)
@@ -4234,6 +4289,9 @@ int main(int argc, char *argv[])
     else
         log_line("ps5loop: no led thread: %s", strerror(errno));
     log_line("ps5loop: listening");
+    pthread_t announcer;
+    if (pthread_create(&announcer, NULL, announce_thread, (void *)(uintptr_t)port) == 0)
+        pthread_detach(announcer);
     for (;;)
     {
         const int client = accept(server, NULL, NULL);
