@@ -16,7 +16,8 @@
     color: var(--text); font: 15px/1.4 -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
     min-height: 100vh; padding: 20px 16px 40px;
   }
-  .wrap { max-width: 920px; margin: 0 auto; }
+  /* the page uses the whole window: cards flow into as many columns as fit */
+  .wrap { max-width: none; margin: 0 auto; }
   header { display: flex; align-items: center; gap: 12px; margin-bottom: 4px; }
   header h1 { font-size: 20px; margin: 0; font-weight: 650; letter-spacing: .2px; }
   header .sub { color: var(--muted); font-size: 13px; }
@@ -27,7 +28,7 @@
     background: rgba(10,14,22,.94); border-bottom: 1px solid var(--line);
     transform: translateY(-100%); transition: transform .18s; }
   body.pinned #pinbar { transform: none; }
-  .pin-in { max-width: 920px; margin: 0 auto; padding: 8px 18px; display: flex; flex-wrap: wrap;
+  .pin-in { max-width: none; margin: 0 auto; padding: 8px 18px; display: flex; flex-wrap: wrap;
     align-items: center; gap: 4px 22px; color: var(--muted); font-size: 13px; }
   .pin-in b { color: var(--text); font-weight: 650; font-size: 15px; font-variant-numeric: tabular-nums; }
   body.pinned .timebar { top: calc(var(--pin-h, 40px) + 8px); }
@@ -50,6 +51,12 @@
   .clock .big { font-size: 46px; font-weight: 700; margin: 8px 0 2px; font-variant-numeric: tabular-nums; }
   .clock .unit { color: var(--muted); font-size: 14px; }
   .chart-card { margin-top: 14px; padding: 16px; }
+  /* charts tile side by side once the window has room for two */
+  /* four charts: one across, then two by two, then four in a row (never three and an orphan) */
+  .charts { display: grid; grid-template-columns: 1fr; gap: 14px; margin-top: 14px; }
+  @media (min-width: 1200px) { .charts { grid-template-columns: 1fr 1fr; } }
+  @media (min-width: 2600px) { .charts { grid-template-columns: repeat(4, 1fr); } }
+  .charts .chart-card { margin-top: 0; }
   .chart-head { width: 100%; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
   .chart-head .label { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .8px; }
   .legend { display: flex; gap: 16px; font-size: 13px; color: var(--muted); }
@@ -99,11 +106,18 @@
   /* ---- control panel ---- */
   h2.section { font-size: 13px; text-transform: uppercase; letter-spacing: .8px; color: var(--muted);
     margin: 26px 2px 10px; font-weight: 650; }
-  .panel { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-  @media (max-width: 680px) { .panel { grid-template-columns: 1fr; } }
+  /* as many ~400 px columns as the window holds; "dense" back-fills gaps a wide card leaves */
+  .panel { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(400px, 100%), 1fr));
+    grid-auto-flow: row dense; gap: 14px; align-items: start; }
   .pcard { background: linear-gradient(180deg, var(--panel2), var(--panel));
-    border: 1px solid var(--line); border-radius: 14px; padding: 14px; }
-  .pcard.wide { grid-column: 1 / -1; }
+    border: 1px solid var(--line); border-radius: 14px; padding: 14px; min-width: 0; }
+  /* a wide card takes two columns where there are two, and one on a narrow screen */
+  .pcard.wide { grid-column: span 2; }
+  @media (max-width: 860px) { .pcard.wide { grid-column: auto; } }
+  /* the console output stays the full width */
+  .pcard.full { grid-column: 1 / -1; }
+  .row.speed input[type=range] { flex: 1 1 140px; padding: 0; border: 0; background: none; accent-color: var(--accent); }
+  .row.speed b { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; min-width: 88px; text-align: right; }
   .pcard h3 { margin: 0 0 10px; font-size: 14px; font-weight: 650; }
   .pcard h3 small { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 6px; }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
@@ -296,6 +310,7 @@
     <span class="hint">hover · drag to zoom · Ctrl+wheel zoom · Shift+wheel pan · double-click resets</span>
   </div>
 
+  <div class="charts">
   <div class="card chart-card">
     <div class="chart-head">
       <span class="label">Temperature history</span>
@@ -339,6 +354,7 @@
       </span>
     </div>
     <div class="uchart" id="powerchart"></div>
+  </div>
   </div>
   </div>
 
@@ -413,7 +429,7 @@
   <h2 class="section">Control</h2>
 
   <!-- output console -->
-  <div class="pcard wide">
+  <div class="pcard full">
     <div class="outhead">
       <h3 style="margin:0">Console output</h3>
       <div class="row" style="margin:0">
@@ -493,7 +509,10 @@
         <label><input type="checkbox" id="kb-empty" checked>the field is empty</label>
         <label><input type="checkbox" id="kb-done">press R2 (Done) after</label>
       </div>
-      <div class="hint" style="margin-bottom:0">Steers the keyboard's highlight key by key, about ½ s a press. It expects a keyboard that has just opened (highlight on G) with the English layout. Letters, digits, space and common symbols; no ~ or accents.</div>
+      <div class="row speed"><label for="kb-speed">Speed</label>
+        <input type="range" id="kb-speed" min="0" max="100" value="50" aria-describedby="kb-speed-val">
+        <b id="kb-speed-val"></b></div>
+      <div class="hint" style="margin-bottom:0">Enter in the field types it (Enter again stops). Steers the keyboard's highlight key by key. Faster settings can drop presses if the console lags; slow down if letters go missing. It expects a keyboard that has just opened (highlight on G) with the English layout. Letters, digits, space and common symbols; no ~ or accents.</div>
     </div>
 
     <!-- sight -->
@@ -1546,6 +1565,41 @@ function planTyping(text, fieldEmpty) {
   return steps;
 }
 
+// Typing speed: the slider runs from slow (0) to fast (100). It sets how long each
+// press is held and the pause after it; 50 is the timing measured on 12.20 (70 ms
+// held, 170 ms apart). Each press also costs one round trip to the console.
+const KB_SPEED_KEY = "ps5devloop.kbSpeed";
+function typingTiming() {
+  const s = Number(document.getElementById("kb-speed").value) / 100;
+  // geometric from slow to fast, so the middle stays at the measured 70/170
+  const lerp = (slow, mid, fast) => s <= 0.5 ? slow * Math.pow(mid / slow, s * 2) : mid * Math.pow(fast / mid, (s - 0.5) * 2);
+  return { holdMs: Math.round(lerp(140, 70, 35)), gapMs: Math.round(lerp(600, 170, 30)) };
+}
+function showTypingSpeed() {
+  const { holdMs, gapMs } = typingTiming();
+  const perPress = holdMs + gapMs + 60; // ~60 ms for the request on a LAN
+  document.getElementById("kb-speed-val").textContent =
+    (1000 / perPress).toFixed(1) + " presses/s";
+  document.getElementById("kb-speed").title = `held ${holdMs} ms, ${gapMs} ms between presses`;
+}
+{
+  const slider = document.getElementById("kb-speed");
+  try { const v = localStorage.getItem(KB_SPEED_KEY); if (v !== null) slider.value = v; } catch (e) { /* no storage */ }
+  slider.addEventListener("input", () => {
+    showTypingSpeed();
+    try { localStorage.setItem(KB_SPEED_KEY, slider.value); } catch (e) { /* no storage */ }
+  });
+  showTypingSpeed();
+  // Enter in the text field types it (or stops a run in progress, as the button does)
+  document.getElementById("kb-text").addEventListener("keydown", ev => {
+    if (ev.key === "Enter" && !ev.isComposing) { ev.preventDefault(); typeText(); }
+  });
+  // and Enter in the raw command box runs it
+  document.getElementById("raw").addEventListener("keydown", ev => {
+    if (ev.key === "Enter" && !ev.isComposing) { ev.preventDefault(); runIf("raw", c => c); }
+  });
+}
+
 let typingStop = false;
 async function typeText() {
   const text = document.getElementById("kb-text").value;
@@ -1557,7 +1611,7 @@ async function typeText() {
   catch (e) { logLine("  → cannot type that: " + e.message, "err"); return; }
   if (document.getElementById("kb-open").checked) steps.unshift(["cross", 1500]);
   if (document.getElementById("kb-done").checked) steps.push(["r2", 0]);
-  const holdMs = 70, gapMs = 170;
+  const { holdMs, gapMs } = typingTiming();
   logLine("» type " + JSON.stringify(text) + "  (" + steps.length + " presses, about " +
     Math.round(steps.reduce((t, s) => t + holdMs + gapMs + s[1] + 200, 0) / 1000) + " s)", "cmd");
   btn.dataset.busy = "1"; btn.textContent = "Stop"; typingStop = false;
@@ -2021,6 +2075,18 @@ const HW_POLL_MS = 15000;
 setTimeout(() => { loadHardware(); loadDisplay(); setInterval(loadHardware, HW_POLL_MS); }, 600);
 
 window.addEventListener("resize", resizeCharts);
+// the charts' boxes change width when the grid reflows (two across, then one), not
+// only when the window resizes: follow the boxes themselves
+if (window.ResizeObserver) {
+  let queued = false;
+  const ro = new ResizeObserver(() => {
+    if (queued) return;
+    queued = true;
+    // a timer, not requestAnimationFrame: that never fires in a hidden tab
+    setTimeout(() => { queued = false; resizeCharts(); }, 50);
+  });
+  document.querySelectorAll(".uchart").forEach(el => ro.observe(el));
+}
 // One request at a time: the next poll is scheduled when this one ends, sooner
 // while a short range is live so a 5 s view still has points to draw.
 async function pollLoop() {
