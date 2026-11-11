@@ -6,6 +6,13 @@
 **Let an AI agent, or a script, drive a jailbroken PS5 by itself: press buttons,
 see the screen, repeat.**
 
+> [!NOTE]
+> **This fork's changes are 100% vibecoded.** DevLoop itself is
+> [Gary Riches' project](https://github.com/griches/PS5_DevLoop); everything this
+> fork adds to it, code and documentation, was written by an AI agent and checked
+> against a real console rather than reviewed line by line. Read it with that in
+> mind before you run it on yours.
+
 Porting homebrew to the PS5 has had a gap in the middle of every loop. A machine
 can build a title, deploy it, launch it and read its log, but it cannot press
 Cross on the menu, and it cannot see that the screen is black. So a person sits
@@ -60,7 +67,8 @@ folder. Point any other agent at it first.
   (ImageMagick): `brew install jxrlib imagemagick`, or your distribution's
   packages.
 - To build: the [PS5 payload SDK](https://github.com/ps5-payload-dev/sdk).
-  `tools/build.sh` finds it through `PS5_PAYLOAD_SDK`.
+  `tools/build.sh` finds it through `PS5_PAYLOAD_SDK`; `BUILDING.md` walks
+  through building and deploying, Windows included.
 - The console's address in `PS5_HOST`, or in `.env` (copy `.env.example`).
 
 DevLoop presses buttons and looks. Launching and closing titles from a script,
@@ -83,6 +91,7 @@ tools. The pad can launch anything from the home screen without them.
 | `delete-capture PATH` | remove a leftover capture through the gallery |
 | `doctor` | check the host, payload, loader and capture tools |
 | `close` | remove the pad |
+| `pads` / `--pad N` | up to four virtual pads: `--pad 2` (to 4) on `open`, `close`, `status`, `press`, `hold`, `release` and `seq` drives another one, `pads` lists them, `close --all` removes them all. Pads 2-4 go to the next signed-in user without a pad and never disconnect a real controller; on the wire it is `pad N ACTION`, and plain `pad ACTION` stays pad 1 |
 
 `tools/ps5loop.py --help` lists the rest; `payload/main.c` documents the wire
 protocol (one text command per connection, port 9112).
@@ -113,11 +122,16 @@ disable that first.
 | `rest` / `reboot` / `power-off` | rest mode, reboot, or power off |
 | `uninstall TITLE_ID` | uninstall a title |
 | `notify TYPE MESSAGE` | an on-screen message: `toast` (banner) or `flyout` (card) |
-| `hwinfo` | model, serial, CPU temp, all 64 SoC sensors (incl. the hottest), CPU clock |
+| `trophy GRADE NAME[\|SUB]` | a notification in the system's trophy style: the overlay's own `InteractiveToastTrophy` template, the grade's artwork from `/system_ex/vsh_asset` (bronze, silver, gold, platinum) and its trophy sound. Only a notification: nothing is unlocked, recorded or synced |
+| `hwinfo` | model, serial, CPU temp, all 64 SoC sensors (incl. the hottest), CPU clock (and each core's, `sceKernelGetCpuCoreClock`), fan speed %, SoC power (mW, total and per rail), system version string, SoC id, CPU mode, core count, uptime |
+| `hwdetail` | JSON (also `GET /api/hwdetail`): the ICC's boot and shutdown counts, operating time, power-up cause, firmware ("Floyd") version, error log (records stamped in seconds since 2012-01-01) and system event log, the last boot's stage timestamps, the secure clock (`/dev/srtc`), USB and disc-drive power states, the SMU's clock table, the PCIe AER and GDDR6 error-rate counters, and system facts (ICC model, AMD part number, build number, budgets). Every read is a libkernel "get"; what is not decoded is sent as hex |
+| `display` | JSON (also `GET /api/display`): the HDMI sink's raw EDID (`sceVideoOutGetHdmiRawEdid_`, port 0x7000: byte 0 is the block count) and the system's 0x144-byte monitor-info record (`sceVideoOutGetHdmiMonitorInfo_`). The dashboard decodes the EDID: name, maker, preferred mode, video modes, HDMI 2.x (TMDS/FRL, VRR, ALLM, DSC), HDR and colorimetry, audio |
+| `thermal-probe` | bring-up: the raw readings libkernel's other thermal paths give (the ICC's `/dev/icc_thermal` byte, the `machdep.aeolia.alert.thermal` sysctl, the SMU's read-only getters), uninterpreted |
 | `df` | free space per mounted volume |
 | `led BWA` / `off` / `auto` / `breathe B W A [MS]` / `chase [MS]` | the console indicator LED (static, off, system-controlled, or an animated effect), via `/dev/icc_indicator` |
 | `fan [TEMP]` | read the fan duty, or set the manual threshold (30..90 °C), via `/dev/icc_fan` |
-| `beeper [PATTERN]` / `mute 0\|1` / `vol 0..2` | beep the console, or set its mute / volume (`sceKernelIccSetBuzzer*`) |
+| `fan hold TEMP [SECS]` / `off` | re-apply the threshold every `SECS` s (default 7) in a background thread — a one-shot `fan set` is reverted by the system, so hold keeps it pinned (idea from [owendswang/ps5-fan-control](https://github.com/owendswang/ps5-fan-control)) |
+| `beeper [PATTERN]` / `mute 0\|1` / `dim 0..2` / `status` | beep the console, set its mute or dim level, or read both back (`sceKernelIccSetBuzzer*`; the ICC's `0x4001950d`/`0x4001950f` getters). Dim is a byte the ICC interprets: by ear on a CFI-2015, 0 is the loudest and sounds like a different speaker, 1 and 2 are softer in the same tone; `vol` is an alias |
 | `kill PID` | end a process (not just a registered app) |
 | `peek PID ADDR LEN` / `poke PID ADDR HEX` | read / write a process's memory (writes are read back and verified) |
 | `scan PID ADDR LEN W VALUE` | find a `W`-byte integer (`W` = 1/2/4/8) in a span of a process's memory |
@@ -135,10 +149,13 @@ byte-for-byte), `hash` (matches `sha256sum` for a 1 MB file and an empty file),
 (ptrace thread-hijack, proved against a disposable sleeper: `getpid`→its own pid,
 `abs(-5)`→5, target survived), `hwinfo`
 (all 64 SoC sensors answer), `df`, `led`/`fan`/`beeper` (ICC ioctls/calls return
-success, including the `breathe`/`chase`/`auto` effects and beeper `mute`/`vol`),
+success, including the `breathe`/`chase`/`auto` effects and beeper `mute`/`dim`),
 `scan`/`scan-aob` (hit a known probe), `kern-read`/`kern-write` and `setting-set`
 (verified), `notify`, `peek`, `http`, the UDP beacon and `klog-stream`, and the
-console-hosted dashboard (`GET /`, `GET /api/hwinfo`). `install` and `exec` are
+console-hosted dashboard with its control panel (`GET /`, `GET /api/hwinfo`,
+`GET /api/hwdetail` and `GET /api/display` — the Hardware and Display sections — and
+`GET /api/run?c=CMD` — verified on 12.20 with `ping`, `hwinfo` and `ls`, and the
+`put`/`quit`/`klog-stream` exclusion refused with 400). `install` and `exec` are
 wired and fail gracefully on a missing target (a positive run needs a real
 `.pkg` / binary); `wake` and rest-mode survival are host/standby paths not
 exercised in this session.
@@ -178,17 +195,40 @@ Notes and limits:
 
 ## Live dashboard
 
-The payload hosts a live hardware dashboard itself: it answers HTTP on the same
-port as the command protocol (9112), so a browser opens it directly.
+The payload hosts a live hardware dashboard **and a control panel** itself: it
+answers HTTP on the same port as the command protocol (9112), so a browser opens
+it directly.
 
 ```
-http://<console>:9112/          # the dashboard
+http://<console>:9112/           # the dashboard
 http://<console>:9112/api/hwinfo # the JSON it polls
+http://<console>:9112/api/run?c=CMD  # run any command, get its reply
 ```
 
-It shows the model, the CPU temperature and **every SoC sensor** (gauges, a grid
-of all readings, and a rolling chart of the CPU and the hottest SoC sensor), and
-the CPU clock. The page is embedded in the payload (`tools/ps5web.html` →
+The top of the page is the live hardware view: the model, the CPU temperature
+and **every SoC sensor** (gauges, a grid of all readings, and a rolling chart of
+the CPU and **all 64 SoC sensors**), the CPU clock, and a **fan-speed gauge and
+rolling chart** (from `sceKernelGetCurrentFanDuty`, not the manual-duty ioctl,
+which reads 0 in auto mode). The charts share one time range, from 5 s to 1 h;
+on the 5 s and 30 s ranges the page samples every 0.5 s instead of every 2 s.
+
+Below it is a control panel that drives **every function the payload has**
+— the virtual pad (open/close and each DualSense button), frame and screenshot
+(shown inline), `ps`/`ls`/`get`/`hash`/`rm`/`mv`, launch/close/uninstall/install,
+`open-url`, `notify`, the LED/fan/beeper, the memory and process tools
+(`peek`/`poke`/`scan`/`call`/`kern-*`/`modules`/`dlsym`), settings, `exec`, and
+power. Destructive actions (power, uninstall, install, `rm`, `poke`,
+`kern-write`, `kill`, `exec`, `setting-set`) ask for confirmation first. A raw
+command box runs anything verbatim.
+
+Each control issues `GET /api/run?c=<command>`; the payload runs that command
+(the same dispatch the text protocol uses) and returns its reply — a picture for
+`frame`/`screenshot`, text otherwise. `put` (upload), `quit` and `klog-stream`
+are not offered over HTTP (they need a connection a browser cannot give); use the
+CLI for those. The payload has no authentication, so serve it only on a network
+you trust — the web panel exposes nothing the command port did not already.
+
+The page is embedded in the payload (`tools/ps5web.html` →
 `payload/dashboard_html.h`, regenerated by `tools/embed_dashboard.py`), so no
 host-side server is needed.
 
@@ -197,6 +237,13 @@ console's address out of the browser:
 
 ```bash
 tools/ps5web.py            # serves http://127.0.0.1:8099, forwards to the console
+```
+
+To try an edit to the page without rebuilding the payload, serve the local file
+instead of the console's copy; the API calls still go to the console:
+
+```bash
+tools/ps5web.py --html tools/ps5web.html
 ```
 
 It uses the same `PS5_HOST`/`.env` as `ps5loop.py`, and never sends the console's
@@ -277,6 +324,11 @@ The virtual pad's call sequence and its 120-byte sample follow what
 payload's command server follows `ps5vkctl` from
 [PS5_Vulkan](https://github.com/mihawk-99/PS5_Vulkan) by Mihawk. Built with the
 [PS5 payload SDK](https://github.com/ps5-payload-dev/sdk).
+
+The dashboard page embeds [uPlot](https://github.com/leeoniya/uPlot) (MIT) for its
+charts and [jpegxr](https://github.com/brion/jpegxr) (BSD-3-Clause; Microsoft's
+jxrlib as WebAssembly, wrapped by Brion Vibber) to show the console's JPEG XR
+captures; its licence is in `third_party/jpegxr-LICENSE.md`.
 
 Two MCP projects that give an agent eyes and hands on a jailbroken PS5 informed
 DevLoop's design, and are worth a look for anyone building in this space:

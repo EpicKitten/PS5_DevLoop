@@ -16,6 +16,10 @@
  *                             that the virtual pad is the one titles read
  *   pad close                 remove it
  *   pad status                handle, device id, user, last insert result
+ *   pad N ...                 any pad command for virtual pad N (1-4; default 1):
+ *                             "pad 2 open" adds a second pad, for the next signed-in
+ *                             user without one (pads 2-4 never disconnect controllers)
+ *   pad list / pad close all  every pad's state / close them all
  *   pad set B LX LY RX RY L2 R2   hold this state (B is a hex button mask)
  *   pad tap B MS              press B for MS milliseconds, then release
  *   pad handle N              bring-up: use N as the insert handle
@@ -52,13 +56,28 @@
  *   uninstall TITLE_ID        uninstall a title
  *   power off|reboot|rest     power off, reboot, or enter rest mode
  *   notify TYPE MESSAGE       show a message: TYPE is toast or flyout
- *   hwinfo                    model, serial, cpu + all SoC temperatures, cpu clock
+ *   trophy GRADE NAME[|SUB]   a notification in the trophy style (bronze..platinum);
+ *                             only a notification, nothing is unlocked
+ *   hwinfo                    model, serial, cpu + all SoC temps, cpu clock (and per
+ *                             core), fan %, SoC power
+ *   hwdetail                  JSON: the ICC's boot counts, operating time, error and
+ *                             event logs, boot-stage times, secure clock, the SMU's
+ *                             clock table, device power states, system facts
+ *   display                   JSON: the HDMI sink's raw EDID and monitor-info record
+ *   thermal-probe             bring-up: the raw ICC thermal byte, the thermal
+ *                             alert sysctl and the SMU's read-only getters
  *   df                        free space per mounted volume
  *   led BWA|off|auto|breathe B W A [MS]|chase [MS]   the console indicator LED
  *   lightbar R G B            attempt the physical pad lightbar (shell owns it)
  *   fan [set TEMP]            read the fan duty, or set the threshold (30..90 C)
- *   beeper [PATTERN]|mute 0|1|vol 0..2   beep, mute, or set the beeper volume
+ *   fan hold TEMP [SECS]      re-apply the threshold every SECS s (default 7); fan hold off
+ *   beeper [PATTERN]|mute 0|1|dim 0..2|status   beep, mute, set the beeper's dim
+ *                             level (0 full, 1 soft, 2 softest; "vol" is an alias),
+ *                             or read both settings back
  *   GET / , GET /api/hwinfo   a browser gets the live dashboard, hosted here
+ *   GET /api/hwdetail, /api/display   the two JSON readings above
+ *   GET /api/run?c=CMD        the dashboard runs any command above; the reply
+ *                             is served as text, or as the picture/file it sends
  *   kill PID                  end a process
  *   peek PID ADDR LEN         read a process's memory
  *   poke PID ADDR HEX         write a process's memory (read back and verified)
@@ -69,6 +88,7 @@
  *   klog-stream [MS]          stream the kernel log until you disconnect
  *   http http://URL           fetch a URL and send the response
  *   (a UDP probe to the command port is answered with an identifier: discovery)
+ *   (at start, a flyout shows the dashboard's address, http://<console>:<port>/)
  *   settings                  read the system registry as JSON
  *   setting-set REGID VALUE   write one integer setting (read back and verified)
  *   quit                      remove the pad and leave the console
@@ -111,6 +131,7 @@
  */
 
 #include <arpa/inet.h>
+#include <ctype.h>
 #include <dirent.h>
 #include <dlfcn.h>
 #include <errno.h>
@@ -251,11 +272,11 @@ static int32_t (*screenshot_capture)(int32_t type, char *path, int (*cancel)(voi
 static int32_t (*content_delete_by_path)(const char *path);
 static bool g_capture_libraries;
 
-/* The virtual pad. */
-static struct
+/* The virtual pads: up to four, each its own device. Pad 1 (slot 0) is the one
+   every command addresses unless another is named ("pad 2 tap ..."). */
+#define PS5LOOP_PADS 4
+typedef struct pad_slot
 {
-    pthread_mutex_t lock;
-    bool libraries; /* libSceMbus loaded and the pad service initialised */
     bool open;
     int32_t handle;
     uint64_t device_id;
@@ -263,7 +284,23 @@ static struct
     int32_t last_insert;
     uint32_t inserts;
     pad_data_t state;
-} g_pad = {.lock = PTHREAD_MUTEX_INITIALIZER, .handle = -1, .user_id = -1};
+} pad_slot_t;
+static struct
+{
+    pthread_mutex_t lock;
+    bool libraries; /* libSceMbus loaded and the pad service initialised */
+    pad_slot_t slot[PS5LOOP_PADS];
+} g_pad = {.lock = PTHREAD_MUTEX_INITIALIZER,
+           .slot = {[0 ... PS5LOOP_PADS - 1] = {.handle = -1, .user_id = -1}}};
+
+// How many pads are open.
+static int pads_open(void)
+{
+    int count = 0;
+    for (int n = 0; n < PS5LOOP_PADS; n++)
+        count += g_pad.slot[n].open;
+    return count;
+}
 
 // Log one line to stdout (klog carries a payload's output) and to the log file
 // the FTP server can hand back.
@@ -288,6 +325,50 @@ static void log_line(const char *format, ...)
     va_end(arguments);
 }
 
+/* When a browser invokes a command over HTTP (GET /api/run), the command's
+ * socket output -- its reply line and any file or picture bytes -- is collected
+ * here instead of being written to the socket, so the HTTP handler can wrap it
+ * in a response. One client is served at a time (the accept loop is serial), so
+ * a single buffer serves; the background threads never produce command output. */
+static struct
+{
+    char *buf;
+    size_t cap, len;
+    bool on, oom;
+} g_capture;
+
+// Every command-output write goes through here: into the capture buffer while a
+// browser's /api/run runs, to the socket otherwise. Returns len while capturing
+// so a caller's "short write" check sees a complete write.
+static ssize_t out(int client, const void *data, size_t len, int flags)
+{
+    if (!g_capture.on)
+        return send(client, data, len, flags);
+    if (!g_capture.oom && len > 0)
+    {
+        if (g_capture.len + len > g_capture.cap)
+        {
+            size_t want = g_capture.cap != 0 ? g_capture.cap : 8192;
+            while (want < g_capture.len + len)
+                want *= 2;
+            char *const bigger = realloc(g_capture.buf, want);
+            if (bigger == NULL)
+                g_capture.oom = true;
+            else
+            {
+                g_capture.buf = bigger;
+                g_capture.cap = want;
+            }
+        }
+        if (!g_capture.oom)
+        {
+            memcpy(g_capture.buf + g_capture.len, data, len);
+            g_capture.len += len;
+        }
+    }
+    return (ssize_t)len;
+}
+
 // Answer one line, newline terminated.
 static void reply(int client, const char *format, ...) __attribute__((format(printf, 2, 3)));
 static void reply(int client, const char *format, ...)
@@ -298,7 +379,7 @@ static void reply(int client, const char *format, ...)
     vsnprintf(line, sizeof(line), format, arguments);
     va_end(arguments);
     log_line("ps5loop: -> %s", line);
-    if (send(client, line, strlen(line), 0) < 0 || send(client, "\n", 1, 0) < 0)
+    if (out(client, line, strlen(line), 0) < 0 || out(client, "\n", 1, 0) < 0)
         log_line("ps5loop: reply failed: %s", strerror(errno));
 }
 
@@ -356,10 +437,14 @@ static void *insert_thread(void *argument)
     for (;;)
     {
         pthread_mutex_lock(&g_pad.lock);
-        if (g_pad.open)
+        for (int n = 0; n < PS5LOOP_PADS; n++)
         {
-            g_pad.last_insert = pad_insert(g_pad.handle, &g_pad.state);
-            g_pad.inserts++;
+            pad_slot_t *const pad = &g_pad.slot[n];
+            if (pad->open)
+            {
+                pad->last_insert = pad_insert(pad->handle, &pad->state);
+                pad->inserts++;
+            }
         }
         pthread_mutex_unlock(&g_pad.lock);
         usleep(PS5LOOP_INSERT_INTERVAL_US);
@@ -405,20 +490,21 @@ static void *discover_thread(void *argument)
     return NULL;
 }
 
-// Hold a state until the next one.
-static void pad_hold(uint32_t buttons, int lx, int ly, int rx, int ry, int l2, int r2)
+// Hold a state on pad n until the next one.
+static void pad_hold(int n, uint32_t buttons, int lx, int ly, int rx, int ry, int l2, int r2)
 {
     pthread_mutex_lock(&g_pad.lock);
-    pad_neutral(&g_pad.state);
-    g_pad.state.buttons = buttons;
-    g_pad.state.lx = (uint8_t)lx;
-    g_pad.state.ly = (uint8_t)ly;
-    g_pad.state.rx = (uint8_t)rx;
-    g_pad.state.ry = (uint8_t)ry;
+    pad_data_t *const state = &g_pad.slot[n].state;
+    pad_neutral(state);
+    state->buttons = buttons;
+    state->lx = (uint8_t)lx;
+    state->ly = (uint8_t)ly;
+    state->rx = (uint8_t)rx;
+    state->ry = (uint8_t)ry;
     // The console reads the triggers from their analog bytes: the bit alone
     // does not register.
-    g_pad.state.l2 = (uint8_t)((buttons & PS5LOOP_BUTTON_L2) != 0 && l2 == 0 ? 255 : l2);
-    g_pad.state.r2 = (uint8_t)((buttons & PS5LOOP_BUTTON_R2) != 0 && r2 == 0 ? 255 : r2);
+    state->l2 = (uint8_t)((buttons & PS5LOOP_BUTTON_L2) != 0 && l2 == 0 ? 255 : l2);
+    state->r2 = (uint8_t)((buttons & PS5LOOP_BUTTON_R2) != 0 && r2 == 0 ? 255 : r2);
     pthread_mutex_unlock(&g_pad.lock);
 }
 
@@ -563,7 +649,11 @@ static int klog_evict_cim(uint64_t keep_device, char *report, size_t size)
         {
             const char *const hex = strstr(row, "0x");
             const uint64_t device = hex != NULL ? strtoull(hex + 2, NULL, 16) : 0;
-            if (device != 0 && device != keep_device && device != 0xffffffffffffffffull)
+            // never one of ours: the pad being opened, or another open virtual pad
+            bool ours = device == keep_device;
+            for (int n = 0; n < PS5LOOP_PADS && !ours; n++)
+                ours = g_pad.slot[n].open && g_pad.slot[n].device_id == device;
+            if (device != 0 && !ours && device != 0xffffffffffffffffull)
             {
                 listed++;
                 const int32_t result = mbus_disconnect != NULL ? mbus_disconnect(device) : -1;
@@ -641,20 +731,60 @@ static int32_t pad_find_handle(int32_t added, const add_device_param_t *param, u
     return -1;
 }
 
-// Create the virtual pad and give it to a user. Returns 0 when samples reach
-// it; the report says what every step returned either way.
-static int pad_open(int32_t user_id, bool evict, char *report, size_t size)
+// A signed-in user for another pad: the first one in the login list that no open
+// pad already belongs to. -1 when every signed-in user has a pad.
+typedef struct login_user_list
 {
-    if (g_pad.open)
+    int32_t user_id[4];
+} login_user_list_t;
+extern int sceUserServiceGetLoginUserIdList(login_user_list_t *list);
+
+static int32_t pad_free_user(void)
+{
+    login_user_list_t list;
+    memset(&list, 0xff, sizeof(list));
+    if (sceUserServiceGetLoginUserIdList(&list) != 0)
+        return -1;
+    for (int i = 0; i < 4; i++)
+    {
+        const int32_t user = list.user_id[i];
+        if (user <= PS5LOOP_UNASSIGNED_USER)
+            continue;
+        bool taken = false;
+        for (int n = 0; n < PS5LOOP_PADS && !taken; n++)
+            taken = g_pad.slot[n].open && g_pad.slot[n].user_id == user;
+        if (!taken)
+            return user;
+    }
+    return -1;
+}
+
+// Create virtual pad n and give it to a user. Returns 0 when samples reach it;
+// the report says what every step returned either way. Pad 1 defaults to the
+// foreground user; pads 2-4 to the next signed-in user without a pad (none: the
+// console asks "Who's using this controller?").
+static int pad_open(int n, int32_t user_id, bool evict, char *report, size_t size)
+{
+    pad_slot_t *const pad = &g_pad.slot[n];
+    if (pad->open)
     {
         note(report, size, "already open");
         return 0;
     }
     if (pad_libraries(report, size) != 0)
         return -1;
-    if (user_id <= PS5LOOP_UNASSIGNED_USER && sceUserServiceGetForegroundUser(&user_id) != 0)
-        user_id = -1;
-    note(report, size, "user=0x%08x", (uint32_t)user_id);
+    if (user_id <= PS5LOOP_UNASSIGNED_USER)
+    {
+        if (n > 0)
+        {
+            user_id = pad_free_user();
+            if (user_id < 0)
+                note(report, size, "no-free-user");
+        }
+        else if (sceUserServiceGetForegroundUser(&user_id) != 0)
+            user_id = -1;
+    }
+    note(report, size, "pad=%d user=0x%08x", n + 1, (uint32_t)user_id);
 
     // The log replays what it holds to a new reader: let that pass, so the
     // device line that follows is this device's.
@@ -710,27 +840,29 @@ static int pad_open(int32_t user_id, bool evict, char *report, size_t size)
     const int32_t handle = pad_find_handle(added, &param, device_id, report, size);
     if (handle < 0)
     {
-        g_pad.device_id = device_id;
+        pad->device_id = device_id;
         return -1;
     }
     pthread_mutex_lock(&g_pad.lock);
-    pad_neutral(&g_pad.state);
-    g_pad.handle = handle;
-    g_pad.device_id = device_id;
-    g_pad.user_id = user_id;
-    g_pad.inserts = 0;
-    g_pad.open = true;
+    pad_neutral(&pad->state);
+    pad->handle = handle;
+    pad->device_id = device_id;
+    pad->user_id = user_id;
+    pad->inserts = 0;
+    pad->last_insert = 0;
+    pad->open = true;
     pthread_mutex_unlock(&g_pad.lock);
     return 0;
 }
 
-static void pad_close(char *report, size_t size)
+static void pad_close(int n, char *report, size_t size)
 {
+    pad_slot_t *const pad = &g_pad.slot[n];
     pthread_mutex_lock(&g_pad.lock);
-    const bool was_open = g_pad.open;
-    const int32_t handle = g_pad.handle;
-    g_pad.open = false;
-    g_pad.handle = -1;
+    const bool was_open = pad->open;
+    const int32_t handle = pad->handle;
+    pad->open = false;
+    pad->handle = -1;
     pthread_mutex_unlock(&g_pad.lock);
     if (!was_open)
     {
@@ -743,12 +875,32 @@ static void pad_close(char *report, size_t size)
     note(report, size, "delete=0x%08x", (uint32_t)scePadVirtualDeviceDeleteDevice(handle));
 }
 
-// Press and release, timed here and not across the network.
-static void pad_tap(uint32_t buttons, int hold_ms)
+// Close every open pad (quit).
+static void pad_close_all(char *report, size_t size)
 {
-    pad_hold(buttons, 128, 128, 128, 128, 0, 0);
+    for (int n = 0; n < PS5LOOP_PADS; n++)
+        if (g_pad.slot[n].open)
+        {
+            note(report, size, "pad%d:", n + 1);
+            pad_close(n, report, size);
+        }
+}
+
+// The first open pad, or -1: what the screenshot shortcut presses Create on.
+static int pad_first_open(void)
+{
+    for (int n = 0; n < PS5LOOP_PADS; n++)
+        if (g_pad.slot[n].open)
+            return n;
+    return -1;
+}
+
+// Press and release on pad n, timed here and not across the network.
+static void pad_tap(int n, uint32_t buttons, int hold_ms)
+{
+    pad_hold(n, buttons, 128, 128, 128, 128, 0, 0);
     usleep((useconds_t)hold_ms * 1000u);
-    pad_hold(0, 128, 128, 128, 128, 0, 0);
+    pad_hold(n, 0, 128, 128, 128, 128, 0, 0);
     usleep(50000);
 }
 
@@ -878,7 +1030,7 @@ static void send_file(int client, const capture_t *capture)
     {
         for (ssize_t sent = 0; sent < bytes;)
         {
-            const ssize_t step = send(client, buffer + sent, (size_t)(bytes - sent), 0);
+            const ssize_t step = out(client, buffer + sent, (size_t)(bytes - sent), 0);
             if (step <= 0)
             {
                 close(file);
@@ -1003,7 +1155,7 @@ static bool direct_shot(int client, int type, int wait_ms, char *report, size_t 
           (long long)status.st_mtime, (uint32_t)deleted, path);
     for (off_t sent = 0; sent < have;)
     {
-        const ssize_t step = send(client, bytes + sent, (size_t)(have - sent), 0);
+        const ssize_t step = out(client, bytes + sent, (size_t)(have - sent), 0);
         if (step <= 0)
             break;
         sent += step;
@@ -1019,7 +1171,8 @@ static bool direct_shot(int client, int type, int wait_ms, char *report, size_t 
 static void take_shot(int client, int hold_ms)
 {
     char report[PS5LOOP_LINE - 128] = {0};
-    if (!g_pad.open)
+    const int shooter = pad_first_open(); // Create works from any controller
+    if (shooter < 0)
     {
         reply(client,
               "err screenshot needs the pad: pad open first (latest-capture sends the newest one)");
@@ -1028,7 +1181,7 @@ static void take_shot(int client, int hold_ms)
     capture_libraries(report, sizeof(report));
     capture_t before[PS5LOOP_NEWEST];
     captures_newest(before);
-    pad_tap(PS5LOOP_BUTTON_CREATE, hold_ms);
+    pad_tap(shooter, PS5LOOP_BUTTON_CREATE, hold_ms);
     off_t last_size = -1;
     const uint64_t deadline = monotonic_us() + PS5LOOP_SHOT_WAIT_MS * 1000ull;
     while (monotonic_us() < deadline)
@@ -1087,7 +1240,7 @@ static void send_bytes(int client, const char *what, const char *buffer, size_t 
     reply(client, "ok file size=%zu mtime=0 path=%s", size, what);
     for (size_t sent = 0; sent < size;)
     {
-        const ssize_t step = send(client, buffer + sent, size - sent, 0);
+        const ssize_t step = out(client, buffer + sent, size - sent, 0);
         if (step <= 0)
             break;
         sent += (size_t)step;
@@ -1355,7 +1508,7 @@ static void get_file(int client, const char *path)
         bool broken = false;
         for (ssize_t sent = 0; sent < got;)
         {
-            const ssize_t step = send(client, buffer + sent, (size_t)(got - sent), 0);
+            const ssize_t step = out(client, buffer + sent, (size_t)(got - sent), 0);
             if (step <= 0)
             {
                 broken = true;
@@ -1866,16 +2019,14 @@ static void json_escape(char *out, size_t size, const char *in)
     out[j] = '\0';
 }
 
-static void notify_flyout(int client, const char *message)
+// Send a flyout card; returns sceNotificationSend's result (-1 on out of memory).
+static int32_t flyout_send(const char *message)
 {
     char safe[320];
     json_escape(safe, sizeof(safe), message);
     char *const json = malloc(2048);
     if (json == NULL)
-    {
-        reply(client, "err notify: out of memory");
-        return;
-    }
+        return -1;
     snprintf(json, 2048,
              "{\"rawData\":{\"viewTemplateType\":\"InteractiveToastTemplateB\","
              "\"channelType\":\"Downloads\",\"useCaseId\":\"IDC\",\"toastOverwriteType\":\"No\","
@@ -1888,7 +2039,138 @@ static void notify_flyout(int client, const char *message)
              safe, safe, (unsigned)(monotonic_us() & 0x7fffffffu));
     const int32_t result = sceNotificationSend(0xFE, true, json);
     free(json);
-    reply(client, "%s notify flyout result=0x%08x", result == 0 ? "ok" : "err", (uint32_t)result);
+    return result;
+}
+
+static void notify_flyout(int client, const char *message)
+{
+    const int32_t result = flyout_send(message);
+    if (result == -1)
+        reply(client, "err notify: out of memory");
+    else
+        reply(client, "%s notify flyout result=0x%08x", result == 0 ? "ok" : "err", (uint32_t)result);
+}
+
+// trophy GRADE NAME[|SUBTITLE]: a notification in the system's own trophy style.
+// It is only a notification: nothing is unlocked, recorded or synced. The
+// template, channel and fields are the notification overlay's (rnps-notification-
+// overlay, NPXS40011: InteractiveToastTrophy on the "Trophies" channel, bundle
+// "local:Trophy", use case NUC55); the icon is the system's own grade artwork in
+// /system_ex/vsh_asset, and the sound is the overlay's trophy sound, its platinum
+// one for platinum. Shown on 12.20 with the gold artwork and the name and subtitle.
+static int32_t trophy_send(const char *grade, const char *name, const char *subtitle)
+{
+    static const struct
+    {
+        const char *grade, *art, *sound;
+    } grades[] = {
+        {"bronze", "Bronze", "sfx_trophy_toast"},
+        {"silver", "Silver", "sfx_trophy_toast"},
+        {"gold", "Gold", "sfx_trophy_toast"},
+        {"platinum", "Platinum", "sfx_platinum_trophy_toast"},
+    };
+    size_t g = 0;
+    while (g + 1 < sizeof(grades) / sizeof(grades[0]) && strcasecmp(grade, grades[g].grade) != 0)
+        g++;
+    if (strcasecmp(grade, grades[g].grade) != 0)
+        return -2;
+    char safe_name[320], safe_sub[320];
+    json_escape(safe_name, sizeof(safe_name), name);
+    json_escape(safe_sub, sizeof(safe_sub), subtitle);
+    char *const json = malloc(4096);
+    if (json == NULL)
+        return -1;
+    snprintf(json, 4096,
+             "{\"rawData\":{\"viewTemplateType\":\"InteractiveToastTrophy\",\"channelType\":\"Trophies\","
+             "\"useCaseId\":\"NUC55\",\"bundleName\":\"local:Trophy\",\"toastOverwriteType\":\"No\","
+             "\"isImmediate\":true,\"priority\":100,\"soundEffect\":\"%s\","
+             "\"viewData\":{\"icon\":{\"type\":\"Url\",\"parameters\":{\"url\":"
+             "\"file:///system_ex/vsh_asset/TrophyUAM_%s.png\",\"iconSize\":\"Square\"}},"
+             "\"message\":{\"body\":\"%s\"},\"subMessage\":{\"body\":\"%s\"},"
+             "\"parameters\":{\"useCaseId\":\"NUC55\",\"trophy\":{\"trophyId\":1,\"trophyName\":\"%s\","
+             "\"trophyGrade\":\"%s\",\"trophyType\":\"%s\",\"trophyHidden\":false},"
+             "\"game\":{\"name\":\"%s\",\"titleName\":\"%s\"},\"label\":\"%s\"},"
+             "\"actions\":[{\"actionName\":\"View trophies\",\"actionType\":\"DeepLink\","
+             "\"defaultFocus\":true,\"parameters\":{\"actionUrl\":\"pstc:browse\"}}]}},"
+             "\"createdDateTime\":\"2025-01-01T00:00:00.000Z\",\"localNotificationId\":\"%u\"}",
+             grades[g].sound, grades[g].art, safe_name, safe_sub, safe_name, grades[g].grade,
+             grades[g].grade, safe_sub, safe_sub, safe_sub,
+             (unsigned)(monotonic_us() & 0x7fffffffu));
+    const int32_t result = sceNotificationSend(0xFE, true, json);
+    free(json);
+    return result;
+}
+
+static void trophy(int client, const char *grade, char *text)
+{
+    ensure_elevated();
+    if (grade == NULL || text == NULL || text[0] == '\0')
+    {
+        reply(client, "err usage: trophy bronze|silver|gold|platinum NAME[|SUBTITLE]");
+        return;
+    }
+    char *const bar = strchr(text, '|');
+    const char *subtitle = "DevLoop";
+    if (bar != NULL)
+    {
+        *bar = '\0';
+        if (bar[1] != '\0')
+            subtitle = bar + 1;
+    }
+    const int32_t result = trophy_send(grade, text, subtitle);
+    if (result == -2)
+        reply(client, "err trophy: grade is bronze, silver, gold or platinum");
+    else if (result == -1)
+        reply(client, "err trophy: out of memory");
+    else
+        reply(client, "%s trophy %s result=0x%08x", result == 0 ? "ok" : "err", grade, (uint32_t)result);
+}
+
+// The console's LAN address, as the routing table picks it: connecting a UDP
+// socket sends nothing, it only chooses the source address getsockname reports.
+// False when there is no route yet (the network is still coming up).
+static bool local_address(char *out, size_t size)
+{
+    const int sock = socket(AF_INET, SOCK_DGRAM, 0);
+    if (sock < 0)
+        return false;
+    struct sockaddr_in to;
+    memset(&to, 0, sizeof(to));
+    to.sin_family = AF_INET;
+    to.sin_port = htons(53);
+    to.sin_addr.s_addr = htonl(0xC0000201u); // 192.0.2.1 (TEST-NET-1): any routed address does
+    struct sockaddr_in me;
+    socklen_t length = sizeof(me);
+    memset(&me, 0, sizeof(me));
+    const bool ok = connect(sock, (struct sockaddr *)&to, sizeof(to)) == 0 &&
+                    getsockname(sock, (struct sockaddr *)&me, &length) == 0 &&
+                    me.sin_addr.s_addr != htonl(INADDR_ANY) &&
+                    me.sin_addr.s_addr != htonl(INADDR_LOOPBACK) &&
+                    inet_ntop(AF_INET, &me.sin_addr, out, (socklen_t)size) != NULL;
+    close(sock);
+    return ok;
+}
+
+// At start, a flyout with the dashboard's address, so a browser can be pointed at
+// it without looking anything up. A payload loaded at boot may run before the
+// network is up, so this waits (up to a minute) for an address before giving up
+// on it and showing the port alone.
+static void *announce_thread(void *argument)
+{
+    const unsigned port = (unsigned)(uintptr_t)argument;
+    char address[INET_ADDRSTRLEN] = "";
+    for (int tries = 0; tries < 60 && !local_address(address, sizeof(address)); tries++)
+        usleep(1000000);
+    ensure_elevated();
+    char message[160];
+    if (address[0] != '\0')
+        snprintf(message, sizeof(message), "DevLoop dashboard: http://%s:%u/", address, port);
+    else
+        snprintf(message, sizeof(message), "DevLoop is running: dashboard on port %u", port);
+    const int32_t result = flyout_send(message);
+    log_line("ps5loop: announced %s (0x%08x)", address[0] != '\0' ? address : "no address",
+             (uint32_t)result);
+    return NULL;
 }
 
 static void notify(int client, const char *type, const char *message)
@@ -1908,6 +2190,41 @@ int sceKernelGetHwSerialNumber(char *);
 long sceKernelGetCpuFrequency(void);
 int sceKernelGetCpuTemperature(int *);
 int sceKernelGetSocSensorTemperature(int, int *);
+// Current (not manual) fan duty: raw value, percent = raw/10. The /dev/icc_fan
+// GET_DUTY ioctl only reports the *manual* duty (0 in auto mode), so use this.
+int sceKernelGetCurrentFanDuty(uint16_t *, void *);
+// SoC power, from the AMD power-management processor (/dev/mp1, ioctl 0xc070ae1f).
+// It fills 0x70 bytes: 28 little-endian uint32. Probed on 12.20: [0..2] and [3..5]
+// are two supply rails, each as power mW, voltage mV, current mA (mW = mV x mA
+// holds on every sample); the rest (what looks like per-rail peaks, an input
+// voltage and a temperature) is not reported here. Which rail feeds the CPU and
+// which the GPU is not established, so they are reported as rails A and B.
+int sceKernelGetSocPowerConsumption(void *);
+// Identity and state, as orezraey's 13.60 probes measured them. On 12.20 the SoC
+// id, CPU mode and version calls answer the same way (probed); the cpumask call
+// is not exported there, so cpuMask stays 0 and only hw.ncpu is known:
+//   sceKernelGetMainSocId()        the SoC's id word (0x00840f80 on a CFI-2014)
+//   sceKernelGetCpumode()          the CPU mode, a small integer
+//   sceKernelGetAvailableCpumask() one bit per core this process may run on
+//   sceKernelGetProsperoSystemSwVersion(v)  0x28 bytes: a size, the version as a
+//                                  string ("13.600.007") and as the firmware word
+int sceKernelGetMainSocId(void);
+int sceKernelGetCpumode(void);
+// (the cpumask call has no SDK stub and is missing on 12.20: it is looked up in
+// libkernel at run time and skipped when absent)
+typedef struct sw_version
+{
+    uint64_t size;
+    char text[0x1c];
+    uint32_t version;
+} sw_version_t;
+int sceKernelGetProsperoSystemSwVersion(sw_version_t *);
+#define HWINFO_POWER_WORDS 28
+// Per-core clocks: libkernel asks the SMU (/dev/mp1, ioctl 0xc00cae1e
+// {u64 core; u32 MHz}) once per core and fills eight uint32 MHz values
+// (probed on 12.20: 8 x 3200 with a game in front).
+int sceKernelGetCpuCoreClock(uint32_t *);
+#define HWINFO_CORES 8
 
 // The SoC exposes many thermal sensors, not one: sceKernelGetSocSensorTemperature
 // answers for ids 0..63 (probed on 13.60; a few succeed on 12.20). Scan them all
@@ -1926,6 +2243,18 @@ typedef struct hwinfo
     int socMax;  // the hottest valid sensor
     int socMaxId;
     int socN;    // how many sensors answered plausibly
+    int fanPct;  // current fan duty 0..100, or -1 if the call is unavailable
+    uint32_t socId;
+    int cpuMode;
+    int ncpu;         // hw.ncpu: the cores the SoC has
+    uint64_t cpuMask; // the cores available to this process
+    long bootTime;    // kern.boottime, unix seconds; 0 if unavailable
+    long uptime;      // seconds since boot (the monotonic clock)
+    char sw[0x20];    // the system software version as the system prints it
+    bool powerOk; // the SoC power call answered
+    uint32_t railmW[2], railmV[2], railmA[2];
+    bool coresOk; // the per-core clock call answered
+    uint32_t coreMHz[HWINFO_CORES];
     int socIds[HWINFO_SOC_SENSORS];
     int socVals[HWINFO_SOC_SENSORS];
 } hwinfo_t;
@@ -1960,6 +2289,72 @@ static void hwinfo_read(hwinfo_t *h)
             h->socMaxId = id;
         }
     }
+    h->fanPct = -1;
+    {
+        uint16_t raw = 0;
+        unsigned char scratch[64] = {0};
+        if (sceKernelGetCurrentFanDuty(&raw, scratch) == 0)
+        {
+            int p = raw / 10;
+            if (p > 100)
+                p = 100;
+            h->fanPct = p;
+        }
+    }
+    h->socId = (uint32_t)sceKernelGetMainSocId();
+    h->cpuMode = sceKernelGetCpumode();
+    {
+        static uint64_t (*cpumask)(void);
+        if (cpumask == NULL)
+        {
+            void *const kernel = dlopen("libkernel_sys.sprx", RTLD_NOW | RTLD_GLOBAL);
+            if (kernel != NULL)
+                cpumask = (uint64_t (*)(void))dlsym(kernel, "sceKernelGetAvailableCpumask");
+        }
+        if (cpumask != NULL)
+            h->cpuMask = cpumask();
+    }
+    {
+        size_t length = sizeof(h->ncpu);
+        if (sysctlbyname("hw.ncpu", &h->ncpu, &length, NULL, 0) != 0)
+            h->ncpu = 0;
+        struct timeval boot = {0};
+        length = sizeof(boot);
+        if (sysctlbyname("kern.boottime", &boot, &length, NULL, 0) == 0)
+            h->bootTime = (long)boot.tv_sec;
+        struct timespec now = {0};
+        if (clock_gettime(CLOCK_MONOTONIC, &now) == 0)
+            h->uptime = (long)now.tv_sec;
+        sw_version_t version;
+        memset(&version, 0, sizeof(version));
+        version.size = sizeof(version);
+        if (sceKernelGetProsperoSystemSwVersion(&version) == 0)
+        {
+            version.text[sizeof(version.text) - 1] = '\0';
+            snprintf(h->sw, sizeof(h->sw), "%s", version.text);
+        }
+    }
+    {
+        uint32_t words[HWINFO_POWER_WORDS + 4] = {0}; // a little slack past the 0x70 bytes
+        if (sceKernelGetSocPowerConsumption(words) == 0)
+        {
+            h->powerOk = true;
+            for (int rail = 0; rail < 2; rail++)
+            {
+                h->railmW[rail] = words[rail * 3];
+                h->railmV[rail] = words[rail * 3 + 1];
+                h->railmA[rail] = words[rail * 3 + 2];
+            }
+        }
+    }
+    {
+        uint32_t cores[HWINFO_CORES * 2] = {0}; // slack, in case a firmware reports more
+        if (sceKernelGetCpuCoreClock(cores) == 0)
+        {
+            h->coresOk = true;
+            memcpy(h->coreMHz, cores, sizeof(h->coreMHz));
+        }
+    }
 }
 
 static void hwinfo(int client)
@@ -1967,8 +2362,13 @@ static void hwinfo(int client)
     hwinfo_t h;
     hwinfo_read(&h);
     reply(client,
-          "ok fw=0x%08x model=%s serial=%s cpuC=%d socC=%d socMax=%d socMaxId=%d socN=%d cpuMHz=%ld",
-          h.fw, h.model, h.serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz);
+          "ok fw=0x%08x model=%s serial=%s cpuC=%d socC=%d socMax=%d socMaxId=%d socN=%d cpuMHz=%ld "
+          "fanPct=%d socmW=%d railAmW=%d railBmW=%d sw=%s socId=0x%08x cpuMode=%d ncpu=%d "
+          "cpuMask=0x%llx uptime=%ld",
+          h.fw, h.model, h.serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz, h.fanPct,
+          h.powerOk ? (int)(h.railmW[0] + h.railmW[1]) : -1, h.powerOk ? (int)h.railmW[0] : -1,
+          h.powerOk ? (int)h.railmW[1] : -1, h.sw[0] != '\0' ? h.sw : "?", h.socId, h.cpuMode,
+          h.ncpu, (unsigned long long)h.cpuMask, h.uptime);
 }
 
 // The same reading as a JSON object, for the dashboard the console hosts. The
@@ -1977,7 +2377,8 @@ static char *hwinfo_json(void)
 {
     hwinfo_t h;
     hwinfo_read(&h);
-    char model[520], serial[520];
+    char model[520], serial[520], sw[80];
+    json_escape(sw, sizeof(sw), h.sw);
     json_escape(model, sizeof(model), h.model);
     json_escape(serial, sizeof(serial), h.serial);
     size_t cap = 1u << 12, used = 0;
@@ -1985,12 +2386,446 @@ static char *hwinfo_json(void)
     json = text_append(json, &cap, &used,
                        "{\"ok\":true,\"fw\":\"0x%08x\",\"model\":\"%s\",\"serial\":\"%s\","
                        "\"cpuC\":%d,\"socC\":%d,\"socMax\":%d,\"socMaxId\":%d,\"socN\":%d,"
-                       "\"cpuMHz\":%ld,\"socSensors\":[",
-                       h.fw, model, serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz);
+                       "\"cpuMHz\":%ld,\"fanPct\":%d,",
+                       h.fw, model, serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz,
+                       h.fanPct);
+    json = text_append(json, &cap, &used,
+                       "\"sw\":\"%s\",\"socId\":\"0x%08x\",\"cpuMode\":%d,\"ncpu\":%d,"
+                       "\"cores\":%d,\"cpuMask\":\"0x%llx\",\"bootTime\":%ld,\"uptime\":%ld,",
+                       sw, h.socId, h.cpuMode, h.ncpu, __builtin_popcountll(h.cpuMask),
+                       (unsigned long long)h.cpuMask, h.bootTime, h.uptime);
+    // "power": per-rail readings, or null when the call is unavailable
+    if (h.powerOk)
+        json = text_append(json, &cap, &used,
+                           "\"power\":{\"mW\":[%u,%u],\"mV\":[%u,%u],\"mA\":[%u,%u]},",
+                           h.railmW[0], h.railmW[1], h.railmV[0], h.railmV[1], h.railmA[0],
+                           h.railmA[1]);
+    else
+        json = text_append(json, &cap, &used, "\"power\":null,");
+    // "pads": the virtual pads, for the dashboard's connected lights: open, and
+    // whether the last sample reached the system (lastInsert 0). No user names:
+    // the page shows which pad, not whose. "pad" repeats pad 1, as older pages read it.
+    {
+        pad_slot_t copy[PS5LOOP_PADS];
+        pthread_mutex_lock(&g_pad.lock);
+        memcpy(copy, g_pad.slot, sizeof(copy));
+        pthread_mutex_unlock(&g_pad.lock);
+        json = text_append(json, &cap, &used, "\"pads\":[");
+        for (int n = 0; json != NULL && n < PS5LOOP_PADS; n++)
+            json = text_append(json, &cap, &used,
+                               "%s{\"n\":%d,\"open\":%s,\"device\":\"0x%llx\",\"user\":\"0x%08x\","
+                               "\"lastInsert\":\"0x%08x\",\"inserts\":%u}",
+                               n ? "," : "", n + 1, copy[n].open ? "true" : "false",
+                               (unsigned long long)copy[n].device_id, (uint32_t)copy[n].user_id,
+                               (uint32_t)copy[n].last_insert, copy[n].inserts);
+        json = text_append(json, &cap, &used,
+                           "],\"pad\":{\"open\":%s,\"device\":\"0x%llx\",\"user\":\"0x%08x\","
+                           "\"lastInsert\":\"0x%08x\",\"inserts\":%u},",
+                           copy[0].open ? "true" : "false", (unsigned long long)copy[0].device_id,
+                           (uint32_t)copy[0].user_id, (uint32_t)copy[0].last_insert, copy[0].inserts);
+    }
+    if (h.coresOk)
+    {
+        json = text_append(json, &cap, &used, "\"coreMHz\":[");
+        for (int i = 0; json != NULL && i < HWINFO_CORES; i++)
+            json = text_append(json, &cap, &used, "%s%u", i ? "," : "", h.coreMHz[i]);
+        json = text_append(json, &cap, &used, "],");
+    }
+    else
+        json = text_append(json, &cap, &used, "\"coreMHz\":null,");
+    json = text_append(json, &cap, &used, "\"socSensors\":[");
     for (int i = 0; json != NULL && i < h.socN; i++)
         json = text_append(json, &cap, &used, "%s{\"id\":%d,\"c\":%d}", i ? "," : "", h.socIds[i],
                            h.socVals[i]);
     return text_append(json, &cap, &used, "]}");
+}
+
+// thermal-probe: the temperature-looking sources libkernel reaches that hwinfo
+// does not report, read raw so their meaning can be worked out. Every request
+// here is one a libkernel getter makes (found by cross-referencing its /dev
+// strings on 12.20) and is direction OUT only: the driver fills a buffer and
+// nothing is written to the hardware. Nothing is interpreted; a failed read
+// prints its errno.
+#define MP1_DEV "/dev/mp1"
+#define MP1_METRICS 0x406cae01ul // 108 bytes OUT
+#define ICC_THERMAL_DEV "/dev/icc_thermal"
+#define ICC_THERMAL_GET 0x40019003ul // 1 byte OUT
+
+static void thermal_probe(int client)
+{
+    ensure_elevated();
+    char line[PS5LOOP_LINE];
+    size_t used = 0;
+#define PROBE_ADD(...)                                                                             \
+    do                                                                                             \
+    {                                                                                              \
+        const int n = snprintf(line + used, sizeof(line) - used, __VA_ARGS__);                    \
+        if (n > 0)                                                                                 \
+            used = used + (size_t)n < sizeof(line) ? used + (size_t)n : sizeof(line) - 1;          \
+    } while (0)
+
+    // The ICC (the fan's microcontroller): one byte
+    int fd = open(ICC_THERMAL_DEV, O_RDONLY);
+    if (fd < 0)
+        PROBE_ADD("icc=err:%d", errno);
+    else
+    {
+        unsigned char b = 0;
+        if (ioctl(fd, ICC_THERMAL_GET, &b) == 0)
+            PROBE_ADD("icc=%u", b);
+        else
+            PROBE_ADD("icc=err:%d", errno);
+        close(fd);
+    }
+
+    // The southbridge's thermal-alert sysctl
+    {
+        int v = 0;
+        size_t length = sizeof(v);
+        if (sysctlbyname("machdep.aeolia.alert.thermal", &v, &length, NULL, 0) == 0)
+            PROBE_ADD(" aeolia=%d/len%zu", v, length);
+        else
+            PROBE_ADD(" aeolia=err:%d", errno);
+    }
+
+    // The SMU (mp1): the power blob's tail, then four 4-byte getters and a
+    // 108-byte table
+    {
+        uint32_t words[HWINFO_POWER_WORDS] = {0};
+        if (sceKernelGetSocPowerConsumption(words) == 0)
+            PROBE_ADD(" pw24=%u pw25=%u pw26=%u pw27=%u", words[24], words[25], words[26], words[27]);
+        else
+            PROBE_ADD(" pw=err");
+    }
+    fd = open(MP1_DEV, O_RDWR);
+    if (fd < 0)
+        PROBE_ADD(" mp1=err:%d", errno);
+    else
+    {
+        static const unsigned long getters[] = {0x4004ae22ul, 0x4004ae23ul, 0x4004ae24ul,
+                                                0x4004ae25ul};
+        for (size_t i = 0; i < sizeof(getters) / sizeof(getters[0]); i++)
+        {
+            uint32_t v = 0;
+            if (ioctl(fd, getters[i], &v) == 0)
+                PROBE_ADD(" ae%02lx=%u", (getters[i] & 0xff), v);
+            else
+                PROBE_ADD(" ae%02lx=err:%d", (getters[i] & 0xff), errno);
+        }
+        uint32_t table[27] = {0};
+        if (ioctl(fd, MP1_METRICS, table) == 0)
+        {
+            PROBE_ADD(" ae01=");
+            for (int i = 0; i < 27; i++)
+                PROBE_ADD("%s%u", i ? "," : "", table[i]);
+        }
+        else
+            PROBE_ADD(" ae01=err:%d", errno);
+        close(fd);
+    }
+#undef PROBE_ADD
+    reply(client, "ok thermal-probe %s", line);
+}
+
+// ===== hwdetail: the ICC's counters and logs, the SMU clock table, system facts =====
+// Slow-changing readings, served apart from hwinfo so the dashboard can fetch
+// them every few seconds instead of four times a second. Every request is one a
+// libkernel getter makes (cross-referenced on 12.20, README "Hardware calls"),
+// direction OUT or a zeroed INOUT "get": nothing is written to the hardware.
+// Values the probes could not decode are sent raw, as hex, for the page to show.
+int sceKernelGetSocClock(void *);
+#define SRTC_EPOCH 1325376000L // the ICC and srtc count seconds from 2012-01-01 UTC
+
+// Append "key":"hex" in chunks: text_append guarantees only ~1280 bytes a call.
+static char *json_hex(char *json, size_t *cap, size_t *used, const char *key, const uint8_t *b,
+                      size_t n)
+{
+    json = text_append(json, cap, used, "\"%s\":\"", key);
+    for (size_t at = 0; json != NULL && at < n; at += 256)
+    {
+        char chunk[513];
+        const size_t take = n - at < 256 ? n - at : 256;
+        for (size_t i = 0; i < take; i++)
+            snprintf(chunk + 2 * i, 3, "%02x", b[at + i]);
+        chunk[2 * take] = '\0';
+        json = text_append(json, cap, used, "%s", chunk);
+    }
+    return text_append(json, cap, used, "\",");
+}
+
+// One ioctl on a device opened for it: 0, or the errno. buf is zeroed first.
+static int dev_get(const char *dev, unsigned long cmd, void *buf, size_t size)
+{
+    memset(buf, 0, size);
+    const int fd = open(dev, O_RDWR);
+    if (fd < 0)
+        return errno;
+    const int rc = ioctl(fd, cmd, buf);
+    const int error = rc == 0 ? 0 : errno;
+    close(fd);
+    return error;
+}
+
+// A sysctl's value: its length, or -1 on failure. buf is zeroed first.
+static long sysctl_get(const char *name, void *buf, size_t size)
+{
+    memset(buf, 0, size);
+    size_t length = size;
+    if (sysctlbyname(name, buf, &length, NULL, 0) != 0)
+        return -1;
+    return (long)length;
+}
+
+// A sysctl as a JSON integer (little-endian, up to 8 bytes), or null.
+static char *json_sysctl_int(char *json, size_t *cap, size_t *used, const char *key,
+                             const char *name)
+{
+    uint8_t b[8];
+    const long n = sysctl_get(name, b, sizeof(b));
+    if (n <= 0)
+        return text_append(json, cap, used, "\"%s\":null,", key);
+    uint64_t v = 0;
+    memcpy(&v, b, (size_t)n < sizeof(v) ? (size_t)n : sizeof(v));
+    return text_append(json, cap, used, "\"%s\":%llu,", key, (unsigned long long)v);
+}
+
+// A sysctl as a JSON string (printable characters only, trailing blanks dropped).
+static char *json_sysctl_text(char *json, size_t *cap, size_t *used, const char *key,
+                              const char *name)
+{
+    char b[96];
+    const long n = sysctl_get(name, b, sizeof(b) - 1);
+    if (n <= 0)
+        return text_append(json, cap, used, "\"%s\":null,", key);
+    size_t end = 0;
+    for (size_t i = 0; i < (size_t)n && b[i] != '\0'; i++)
+        if (b[i] < 32 || b[i] > 126)
+            b[i] = '?';
+        else
+            end = b[i] == ' ' ? end : i + 1;
+    b[end] = '\0';
+    char escaped[200];
+    json_escape(escaped, sizeof(escaped), b);
+    return text_append(json, cap, used, "\"%s\":\"%s\",", key, escaped);
+}
+
+// A one-ioctl getter as a JSON integer (little-endian), or null when it fails.
+static char *json_dev_int(char *json, size_t *cap, size_t *used, const char *key,
+                          const char *dev, unsigned long cmd)
+{
+    uint8_t b[8];
+    const size_t size = (cmd >> 16) & 0x1fff;
+    if (size > sizeof(b) || dev_get(dev, cmd, b, sizeof(b)) != 0)
+        return text_append(json, cap, used, "\"%s\":null,", key);
+    uint64_t v = 0;
+    memcpy(&v, b, size);
+    return text_append(json, cap, used, "\"%s\":%llu,", key, (unsigned long long)v);
+}
+
+static char *hwdetail_json(void)
+{
+    ensure_elevated();
+    size_t cap = 1u << 14, used = 0;
+    char *json = malloc(cap);
+    json = text_append(json, &cap, &used, "{\"ok\":true,");
+
+    // icc_power: boot/shutdown counts, operating time, power-up cause
+    {
+        uint32_t counts[3];
+        if (dev_get("/dev/icc_power", 0xc00c9904ul, counts, sizeof(counts)) == 0)
+            json = text_append(json, &cap, &used, "\"boots\":%u,\"shutdowns\":%u,", counts[1],
+                               counts[2]);
+        else
+            json = text_append(json, &cap, &used, "\"boots\":null,\"shutdowns\":null,");
+        uint64_t optime[2];
+        // u64 [1] counts the operating time; it did not move over 140 s on 12.20, so it
+        // is likely saved at shutdown (unit unconfirmed: seconds fits 150 boots)
+        if (dev_get("/dev/icc_power", 0xc0109905ul, optime, sizeof(optime)) == 0)
+            json = text_append(json, &cap, &used, "\"opTime\":%llu,",
+                               (unsigned long long)optime[1]);
+        else
+            json = text_append(json, &cap, &used, "\"opTime\":null,");
+        uint8_t cause[9];
+        if (dev_get("/dev/icc_power", 0xc0099902ul, cause, sizeof(cause)) == 0)
+            json = json_hex(json, &cap, &used, "upCause", cause, sizeof(cause));
+        json = json_dev_int(json, &cap, &used, "upCause2", "/dev/icc_power", 0x40019907ul);
+        json = json_dev_int(json, &cap, &used, "bootReqCount", "/dev/icc_power", 0x4004990bul);
+    }
+
+    // icc_floyd version, icc_configuration and icc_device_power states, other ICC bytes
+    {
+        uint8_t floyd[14];
+        if (dev_get("/dev/icc_floyd", 0x400eb701ul, floyd, sizeof(floyd)) == 0)
+            json = json_hex(json, &cap, &used, "floyd", floyd, sizeof(floyd));
+        json = json_dev_int(json, &cap, &used, "cpuInfoBit", "/dev/icc_configuration", 0xc0029203ul);
+        json = json_dev_int(json, &cap, &used, "bdChucking", "/dev/icc_configuration", 0x40019209ul);
+        json = json_dev_int(json, &cap, &used, "emcBt", "/dev/icc_configuration", 0x40019213ul);
+        json = json_dev_int(json, &cap, &used, "usbPower", "/dev/icc_device_power", 0x40019c04ul);
+        json = json_dev_int(json, &cap, &used, "bdPower", "/dev/icc_device_power", 0x40019c08ul);
+        json = json_dev_int(json, &cap, &used, "iccHdmi", "/dev/icc_hdmi", 0x4001c301ul);
+        json = json_dev_int(json, &cap, &used, "iccCrash", "/dev/icc_crash_report", 0x4001c101ul);
+        json = json_dev_int(json, &cap, &used, "bd401", "/dev/icc_bddrive", 0x4002c401ul);
+        json = json_dev_int(json, &cap, &used, "bd402", "/dev/icc_bddrive", 0x4004c402ul);
+        json = json_dev_int(json, &cap, &used, "bd404", "/dev/icc_bddrive", 0x4001c404ul);
+        json = json_dev_int(json, &cap, &used, "iccThermal", "/dev/icc_thermal", 0x40019003ul);
+        // the beeper's persistent settings: dim (0 full, 1 soft, 2 softest) and off
+        json = json_dev_int(json, &cap, &used, "beeperDim", "/dev/icc_indicator", 0x4001950dul);
+        json = json_dev_int(json, &cap, &used, "beeperOff", "/dev/icc_indicator", 0x4001950ful);
+    }
+
+    // the last boot's stage timestamps (96 u32, zero where a stage did not run)
+    {
+        uint32_t stamps[96];
+        if (dev_get("/dev/icc_configuration", 0x4180920eul, stamps, sizeof(stamps)) == 0)
+        {
+            json = text_append(json, &cap, &used, "\"bootTimes\":[");
+            for (int i = 0; json != NULL && i < 96; i++)
+                json = text_append(json, &cap, &used, "%s%u", i ? "," : "", stamps[i]);
+            json = text_append(json, &cap, &used, "],");
+        }
+        else
+            json = text_append(json, &cap, &used, "\"bootTimes\":null,");
+    }
+
+    // the secure RTC: seconds from 2012, sent as unix seconds
+    {
+        uint32_t rtc[4];
+        if (dev_get("/dev/srtc", 0x40105305ul, rtc, sizeof(rtc)) == 0 && rtc[0] != 0)
+            json = text_append(json, &cap, &used, "\"srtc\":%ld,", SRTC_EPOCH + (long)rtc[0]);
+        else
+            json = text_append(json, &cap, &used, "\"srtc\":null,");
+    }
+
+    // the SMU's clock table (27 words, MHz; the GPU's max 2230 is among them)
+    {
+        uint32_t clocks[32];
+        memset(clocks, 0, sizeof(clocks));
+        if (sceKernelGetSocClock(clocks) == 0)
+        {
+            json = text_append(json, &cap, &used, "\"socClock\":[");
+            for (int i = 0; json != NULL && i < 27; i++)
+                json = text_append(json, &cap, &used, "%s%u", i ? "," : "", clocks[i]);
+            json = text_append(json, &cap, &used, "],");
+        }
+        else
+            json = text_append(json, &cap, &used, "\"socClock\":null,");
+    }
+
+    // ICC logs: the error log (63 x 32-byte records after a 4-byte header), the
+    // system event log, and the counters behind boots and operating time
+    {
+        uint8_t *const log = malloc(4096);
+        if (log != NULL)
+        {
+            long n = sysctl_get("machdep.icc.err_log", log, 4096);
+            if (n > 0)
+                json = json_hex(json, &cap, &used, "errLog", log, (size_t)n);
+            n = sysctl_get("machdep.icc.sys_event_log", log, 4096);
+            if (n > 0)
+                json = json_hex(json, &cap, &used, "sysEventLog", log, (size_t)n);
+            n = sysctl_get("machdep.icc.count_time", log, 4096);
+            if (n > 0)
+                json = json_hex(json, &cap, &used, "countTime", log, (size_t)n);
+            n = sysctl_get("hw.pcist.get_pci_aer", log, 4096);
+            if (n > 0)
+                json = json_hex(json, &cap, &used, "pciAer", log, (size_t)n);
+            n = sysctl_get("hw.umc.get_erate_in_game", log, 4096);
+            if (n > 0)
+                json = json_hex(json, &cap, &used, "umcErate", log, (size_t)n);
+            free(log);
+        }
+    }
+
+    // system facts
+    json = json_sysctl_text(json, &cap, &used, "hwModel", "machdep.icc.hw_model");
+    json = json_sysctl_text(json, &cap, &used, "processor", "kern.processor_name_id");
+    json = json_sysctl_int(json, &cap, &used, "productShape", "hw.config.product_shape");
+    json = json_sysctl_int(json, &cap, &used, "specialModel", "hw.config.special_model_flag");
+    json = json_sysctl_int(json, &cap, &used, "ecoCharge", "hw.config.is_ecocharge_available");
+    json = json_sysctl_int(json, &cap, &used, "hddssd", "hw.config.hddssd");
+    json = json_sysctl_int(json, &cap, &used, "subsysId", "hw.sce_subsys_subid");
+    json = json_sysctl_int(json, &cap, &used, "bdDrive", "hw.config.bd_drive");
+    json = json_sysctl_int(json, &cap, &used, "opticalOut", "hw.config.optical_out");
+    json = json_sysctl_int(json, &cap, &used, "m2Attached", "hw.m2_device_attached");
+    json = json_sysctl_int(json, &cap, &used, "thermalAlert", "machdep.aeolia.alert.thermal");
+    json = json_sysctl_int(json, &cap, &used, "tscHz", "machdep.tsc_freq");
+    json = json_sysctl_int(json, &cap, &used, "buildnum", "kern.buildnum");
+    json = json_sysctl_int(json, &cap, &used, "neomode", "kern.neomode");
+    json = json_sysctl_int(json, &cap, &used, "cpumodeGame", "kern.cpumode_game");
+    json = json_sysctl_int(json, &cap, &used, "resumeType", "kern.system_suspend.last_resume_type");
+    json = json_sysctl_int(json, &cap, &used, "availPages", "hw.availpages");
+    json = json_sysctl_int(json, &cap, &used, "mlockAvail", "vm.budgets.mlock_avail");
+    json = json_sysctl_int(json, &cap, &used, "mlockTotal", "vm.budgets.mlock_total");
+    json = json_sysctl_int(json, &cap, &used, "kernHeap", "vm.kern_heap_size");
+    return text_append(json, &cap, &used, "\"now\":%ld}", (long)time(NULL));
+}
+
+// ===== display: the HDMI sink's EDID and the system's monitor-info record =====
+// libSceVideoOut is dlopened (the payload links no video library). Both calls
+// take the HDMI port id 0x7000 that libSceVideoOut itself passes, so they need
+// no video-out handle (sceVideoOutOpen answers 0x80290009, busy: the compositor
+// owns the port). Probed on 12.20:
+//   sceVideoOutGetHdmiRawEdid_(buf, 0x201)  byte 0 = the number of 128-byte
+//                                           blocks, then the EDID (up to 4 blocks)
+//   sceVideoOutGetHdmiMonitorInfo_(0x7000, buf)  a 0x144-byte record (maker,
+//                                           product, name, capabilities); the
+//                                           library clears it to 0x180
+static char *display_json(void)
+{
+    ensure_elevated();
+    static int (*raw_edid)(void *, size_t);
+    static int (*monitor_info)(long, void *);
+    static bool resolved;
+    if (!resolved)
+    {
+        resolved = true;
+        void *const video = dlopen("libSceVideoOut.sprx", RTLD_NOW | RTLD_GLOBAL);
+        if (video != NULL)
+        {
+            raw_edid = (int (*)(void *, size_t))dlsym(video, "sceVideoOutGetHdmiRawEdid_");
+            monitor_info = (int (*)(long, void *))dlsym(video, "sceVideoOutGetHdmiMonitorInfo_");
+        }
+    }
+    size_t cap = 1u << 13, used = 0;
+    char *json = malloc(cap);
+    json = text_append(json, &cap, &used, "{\"ok\":true,");
+    uint8_t *const buf = calloc(1, 0x400);
+    if (buf == NULL)
+    {
+        free(json);
+        return NULL;
+    }
+    if (raw_edid == NULL)
+        json = text_append(json, &cap, &used, "\"edidRc\":null,");
+    else
+    {
+        const int rc = raw_edid(buf, 0x201);
+        json = text_append(json, &cap, &used, "\"edidRc\":\"0x%08x\",", (uint32_t)rc);
+        if (rc == 0)
+            json = json_hex(json, &cap, &used, "edid", buf, 0x201);
+    }
+    memset(buf, 0, 0x400);
+    if (monitor_info == NULL)
+        json = text_append(json, &cap, &used, "\"monitorRc\":null,");
+    else
+    {
+        const int rc = monitor_info(0x7000, buf);
+        json = text_append(json, &cap, &used, "\"monitorRc\":\"0x%08x\",", (uint32_t)rc);
+        if (rc == 0)
+            json = json_hex(json, &cap, &used, "monitor", buf, 0x144);
+    }
+    free(buf);
+    return text_append(json, &cap, &used, "\"port\":\"0x7000\"}");
+}
+
+// The text-port form of hwdetail and display: the JSON, as a file.
+static void send_json(int client, const char *name, char *json)
+{
+    if (json == NULL)
+        reply(client, "err %s: out of memory", name);
+    else
+        send_bytes(client, name, json, strlen(json));
+    free(json);
 }
 
 // ===== Console hardware: indicator LED, fan and beeper (ICC) =====
@@ -2176,9 +3011,137 @@ static void fan_command(int client, const char *temp_text)
               duty[5]);
 }
 
+// Apply the manual threshold once (clamped). Returns the ioctl result, or -1 if
+// the device would not open.
+static int fan_set_threshold(int temp)
+{
+    if (temp < 30)
+        temp = 30;
+    if (temp > 90)
+        temp = 90;
+    const int fd = open(ICC_FAN_DEV, O_RDONLY);
+    if (fd < 0)
+        return -1;
+    unsigned char data[10] = {0, 0, 0, 0, 0, (unsigned char)temp, 0, 0, 0, 0};
+    const int rc = ioctl(fd, ICC_FAN_SET_THRESHOLD, data);
+    close(fd);
+    return rc;
+}
+
+// The system reverts a manual threshold (on game launch, XMB transitions...), so
+// a one-shot `fan set` does not stick. `fan hold TEMP [SECS]` re-applies it every
+// SECS seconds in the background (idea from owendswang/ps5-fan-control, which runs
+// as a dedicated daemon; here it is one resident thread). `gen` is bumped to tell
+// the current holder to exit, so a restart never leaves two threads running.
+static struct
+{
+    volatile int gen;
+    volatile int running;
+    int temp;
+    int interval;
+} g_fan_hold;
+
+static void *fan_hold_thread(void *arg)
+{
+    const int my_gen = (int)(intptr_t)arg;
+    while (g_fan_hold.gen == my_gen)
+    {
+        fan_set_threshold(g_fan_hold.temp);
+        for (int i = 0; i < g_fan_hold.interval && g_fan_hold.gen == my_gen; i++)
+            sleep(1);
+    }
+    return NULL;
+}
+
+static void fan_hold_command(int client, const char *temp_text, const char *secs_text)
+{
+    if (temp_text == NULL)
+    {
+        if (g_fan_hold.running)
+            reply(client, "ok fan hold on temp=%dC interval=%ds", g_fan_hold.temp,
+                  g_fan_hold.interval);
+        else
+            reply(client, "ok fan hold off");
+        return;
+    }
+    if (strcmp(temp_text, "off") == 0 || strcmp(temp_text, "stop") == 0)
+    {
+        if (!g_fan_hold.running)
+            reply(client, "ok fan hold already off");
+        else
+        {
+            g_fan_hold.running = 0;
+            g_fan_hold.gen++; // the holder thread sees the change and exits within 1 s
+            reply(client, "ok fan hold off (threshold left at %dC)", g_fan_hold.temp);
+        }
+        return;
+    }
+    ensure_elevated();
+    int temp = atoi(temp_text);
+    if (temp < 30)
+        temp = 30;
+    if (temp > 90)
+        temp = 90;
+    int interval = secs_text != NULL ? atoi(secs_text) : 7;
+    if (interval < 1)
+        interval = 1;
+    if (interval > 3600)
+        interval = 3600;
+    if (g_fan_hold.running)
+    {
+        g_fan_hold.temp = temp; // the running holder re-reads these each cycle
+        g_fan_hold.interval = interval;
+        reply(client, "ok fan hold updated temp=%dC interval=%ds", temp, interval);
+        return;
+    }
+    if (fan_set_threshold(temp) != 0)
+    {
+        reply(client, "err fan hold: %s", strerror(errno));
+        return;
+    }
+    g_fan_hold.temp = temp;
+    g_fan_hold.interval = interval;
+    const int my_gen = ++g_fan_hold.gen;
+    pthread_t th;
+    if (pthread_create(&th, NULL, fan_hold_thread, (void *)(intptr_t)my_gen) != 0)
+    {
+        reply(client, "err fan hold: cannot start thread");
+        return;
+    }
+    pthread_detach(th);
+    g_fan_hold.running = 1;
+    reply(client, "ok fan hold temp=%dC interval=%ds", temp, interval);
+}
+
 // Beeper: the sceKernelIccSetBuzzer* calls are not stubs in this SDK, so resolve
 // them from a loaded libkernel at run time (PS5-Suite resolves them the same
-// way). `beep` sounds a pattern (once); `mute` and `vol` are persistent.
+// way). `beep` sounds a pattern (once); `mute` and `dim` are persistent.
+//
+// "dim" is sceKernelIccSetBuzzerDimSetting, which libkernel passes to the ICC as
+// one byte (ioctl 0x8001950c on /dev/icc_indicator, no range check); the getters
+// read it back (0x4001950d dim, 0x4001950f off). The ICC gives it its meaning. By
+// ear on a CFI-2015 (12.20): 0 is the loudest and sounds like a different
+// speaker (likely undimmed drive), 1 is softer, 2 softer still in the same tone.
+// So 0 = full, 1 = soft, 2 = softest; "vol" is kept as an alias for "dim".
+#define ICC_INDICATOR_BUZZER_DIM_GET 0x4001950dul
+#define ICC_INDICATOR_BUZZER_OFF_GET 0x4001950ful
+
+// The persistent buzzer settings, read from the ICC: dim (0 full .. 2 softest) and
+// off (1 = muted). -1 where a read fails.
+static void beeper_settings(int *dim, int *off)
+{
+    *dim = *off = -1;
+    const int fd = open("/dev/icc_indicator", O_RDONLY);
+    if (fd < 0)
+        return;
+    uint8_t v = 0;
+    if (ioctl(fd, ICC_INDICATOR_BUZZER_DIM_GET, &v) == 0)
+        *dim = v;
+    v = 0;
+    if (ioctl(fd, ICC_INDICATOR_BUZZER_OFF_GET, &v) == 0)
+        *off = v;
+    close(fd);
+}
 static int (*icc_buzzer_fn(const char *symbol))(int)
 {
     const char *const libs[] = {"libkernel_sys.sprx", "libkernel.sprx", "libkernel_web.sprx"};
@@ -2198,6 +3161,14 @@ static int (*icc_buzzer_fn(const char *symbol))(int)
 static void beeper_command(int client, const char *action, int value)
 {
     ensure_elevated();
+    int dim, off;
+    if (action != NULL && strcmp(action, "status") == 0)
+    {
+        beeper_settings(&dim, &off);
+        reply(client, "%s beeper dim=%d off=%d (dim: 0 full, 1 soft, 2 softest)",
+              dim >= 0 && off >= 0 ? "ok" : "err", dim, off);
+        return;
+    }
     const char *symbol = "sceKernelIccSetBuzzer"; // pattern 0..3, one shot
     const char *what = "pattern";
     if (action != NULL && strcmp(action, "mute") == 0)
@@ -2205,10 +3176,10 @@ static void beeper_command(int client, const char *action, int value)
         symbol = "sceKernelIccSetBuzzerOffSetting"; // 1 = off (persistent)
         what = "mute";
     }
-    else if (action != NULL && strcmp(action, "vol") == 0)
+    else if (action != NULL && (strcmp(action, "dim") == 0 || strcmp(action, "vol") == 0))
     {
-        symbol = "sceKernelIccSetBuzzerDimSetting"; // 0..2 volume (persistent)
-        what = "vol";
+        symbol = "sceKernelIccSetBuzzerDimSetting"; // 0 full, 1 soft, 2 softest (persistent)
+        what = "dim";
     }
     int (*fn)(int) = icc_buzzer_fn(symbol);
     if (fn == NULL)
@@ -2217,8 +3188,9 @@ static void beeper_command(int client, const char *action, int value)
         return;
     }
     const int rc = fn(value);
-    reply(client, "%s beeper %s=%d result=0x%08x", rc == 0 ? "ok" : "err", what, value,
-          (uint32_t)rc);
+    beeper_settings(&dim, &off); // what the ICC holds now
+    reply(client, "%s beeper %s=%d result=0x%08x now dim=%d off=%d", rc == 0 ? "ok" : "err", what,
+          value, (uint32_t)rc, dim, off);
 }
 
 // df: free space per mounted volume.
@@ -2620,6 +3592,116 @@ static void http_send(int client, const char *status, const char *ctype, const v
     }
 }
 
+// handle_command runs any text command; the dashboard's /api/run reaches it
+// through http_run below, which captures the output instead of writing it.
+static int handle_command(int client, char *line, const char *body, size_t body_len);
+
+// Percent-decode a URL component into dst; '+' becomes a space.
+static void url_decode(char *dst, size_t dst_size, const char *src)
+{
+    size_t o = 0;
+    for (size_t i = 0; src[i] != '\0' && o + 1 < dst_size; i++)
+    {
+        if (src[i] == '%' && isxdigit((unsigned char)src[i + 1]) &&
+            isxdigit((unsigned char)src[i + 2]))
+        {
+            const char hex[3] = {src[i + 1], src[i + 2], '\0'};
+            dst[o++] = (char)strtol(hex, NULL, 16);
+            i += 2;
+        }
+        else if (src[i] == '+')
+            dst[o++] = ' ';
+        else
+            dst[o++] = src[i];
+    }
+    dst[o] = '\0';
+}
+
+// The content type to serve a captured "ok file" reply as, by its path's
+// extension; NULL means "serve it as text" (ps, ls, settings, a text file).
+static const char *content_type_for(const char *path)
+{
+    const char *const dot = strrchr(path, '.');
+    if (dot != NULL)
+    {
+        if (strcasecmp(dot, ".jpg") == 0 || strcasecmp(dot, ".jpeg") == 0)
+            return "image/jpeg";
+        if (strcasecmp(dot, ".png") == 0)
+            return "image/png";
+        if (strcasecmp(dot, ".jxr") == 0)
+            return "image/vnd.ms-photo";
+    }
+    return NULL;
+}
+
+// Run one text command for a browser and wrap its output in an HTTP response.
+// The command's socket output is captured (see out()): a single "ok file ..."
+// reply (frame, screenshot, get, ps, ls, ...) is served as that file -- a
+// picture inline, text as text -- and every other reply is served as text.
+static void http_run(int client, const char *query, bool head_only)
+{
+    const char *c = NULL;
+    if (query != NULL && strncmp(query, "c=", 2) == 0)
+        c = query + 2;
+    else if (query != NULL)
+    {
+        const char *const at = strstr(query, "&c=");
+        if (at != NULL)
+            c = at + 3;
+    }
+    if (c == NULL)
+    {
+        http_send(client, "400 Bad Request", "text/plain; charset=utf-8",
+                  "usage: /api/run?c=<command>", 27, head_only);
+        return;
+    }
+    char raw[PS5LOOP_LINE];
+    snprintf(raw, sizeof(raw), "%s", c);
+    char *const amp = strchr(raw, '&');
+    if (amp != NULL)
+        *amp = '\0';
+    char decoded[PS5LOOP_LINE] = {0};
+    url_decode(decoded, sizeof(decoded), raw);
+    // These need a connection the browser cannot give (an upload body, a live
+    // stream) or would end the payload: they are not offered over HTTP.
+    char verb[32] = {0};
+    (void)sscanf(decoded, "%31s", verb);
+    if (verb[0] == '\0' || strcmp(verb, "put") == 0 || strcmp(verb, "quit") == 0 ||
+        strcmp(verb, "klog-stream") == 0 || strcmp(verb, "GET") == 0 || strcmp(verb, "HEAD") == 0)
+    {
+        http_send(client, "400 Bad Request", "text/plain; charset=utf-8",
+                  "command not available over HTTP", 31, head_only);
+        return;
+    }
+    g_capture.len = 0;
+    g_capture.oom = false;
+    g_capture.on = true;
+    (void)handle_command(client, decoded, NULL, 0);
+    g_capture.on = false;
+    if (g_capture.oom || g_capture.buf == NULL)
+    {
+        http_send(client, "500 Internal Server Error", "text/plain; charset=utf-8",
+                  "capture failed", 14, head_only);
+        return;
+    }
+    char *const data = g_capture.buf;
+    const size_t total = g_capture.len;
+    size_t head = 0;
+    while (head < total && data[head] != '\n')
+        head++;
+    // "ok file size=N ... path=P\n" then N bytes: serve the bytes as the file.
+    if (total >= 8 && memcmp(data, "ok file ", 8) == 0 && head < total)
+    {
+        data[head] = '\0';
+        const char *const key = strstr(data, "path=");
+        const char *const ctype = key != NULL ? content_type_for(key + 5) : NULL;
+        http_send(client, "200 OK", ctype != NULL ? ctype : "text/plain; charset=utf-8",
+                  data + head + 1, total - head - 1, head_only);
+        return;
+    }
+    http_send(client, "200 OK", "text/plain; charset=utf-8", data, total, head_only);
+}
+
 static void http_serve_page(int client, const char *verb, const char *url)
 {
     const bool head_only = strcmp(verb, "HEAD") == 0;
@@ -2631,14 +3713,22 @@ static void http_serve_page(int client, const char *verb, const char *url)
                   head_only);
         return;
     }
-    if (strcmp(url, "/api/hwinfo") == 0)
+    if (strcmp(url, "/api/hwinfo") == 0 || strcmp(url, "/api/hwdetail") == 0 ||
+        strcmp(url, "/api/display") == 0)
     {
-        char *const json = hwinfo_json();
+        char *const json = strcmp(url, "/api/hwinfo") == 0     ? hwinfo_json()
+                           : strcmp(url, "/api/hwdetail") == 0 ? hwdetail_json()
+                                                               : display_json();
         if (json == NULL)
             http_send(client, "500 Internal Server Error", "text/plain", "oom", 3, head_only);
         else
             http_send(client, "200 OK", "application/json", json, strlen(json), head_only);
         free(json);
+        return;
+    }
+    if (strncmp(url, "/api/run", 8) == 0 && (url[8] == '\0' || url[8] == '?'))
+    {
+        http_run(client, url[8] == '?' ? url + 9 : NULL, head_only);
         return;
     }
     http_send(client, "404 Not Found", "text/plain; charset=utf-8", "not found", 9, head_only);
@@ -2686,14 +3776,14 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     }
     if (strcmp(command, "ping") == 0)
     {
-        reply(client, "ok ps5loop 1 pid=%d fw=0x%08x pad=%s probe=0x%llx kproc=0x%lx", (int)getpid(),
-              kernel_get_fw_version(), g_pad.open ? "open" : "closed",
-              (unsigned long long)(uintptr_t)g_probe, (long)kernel_get_proc(getpid()));
+        reply(client, "ok ps5loop 1 pid=%d fw=0x%08x pad=%s pads=%d probe=0x%llx kproc=0x%lx",
+              (int)getpid(), kernel_get_fw_version(), g_pad.slot[0].open ? "open" : "closed",
+              pads_open(), (unsigned long long)(uintptr_t)g_probe, (long)kernel_get_proc(getpid()));
         return 0;
     }
     if (strcmp(command, "quit") == 0)
     {
-        pad_close(report, sizeof(report));
+        pad_close_all(report, sizeof(report));
         reply(client, "ok bye %s", report);
         return -1;
     }
@@ -2766,7 +3856,7 @@ static int handle_command(int client, char *line, const char *body, size_t body_
         reply(client, "ok file size=%zu mtime=0 path=klog", used);
         for (size_t sent = 0; buffer != NULL && sent < used;)
         {
-            const ssize_t step = send(client, buffer + sent, used - sent, 0);
+            const ssize_t step = out(client, buffer + sent, used - sent, 0);
             if (step <= 0)
                 break;
             sent += (size_t)step;
@@ -2979,9 +4069,33 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             notify(client, type, message);
         return 0;
     }
+    if (strcmp(command, "trophy") == 0)
+    {
+        const char *const grade = strtok(NULL, " \t");
+        char *text = strtok(NULL, "");
+        while (text != NULL && (*text == ' ' || *text == '\t'))
+            text++;
+        trophy(client, grade, text);
+        return 0;
+    }
     if (strcmp(command, "hwinfo") == 0)
     {
         hwinfo(client);
+        return 0;
+    }
+    if (strcmp(command, "hwdetail") == 0)
+    {
+        send_json(client, "hwdetail.json", hwdetail_json());
+        return 0;
+    }
+    if (strcmp(command, "display") == 0)
+    {
+        send_json(client, "display.json", display_json());
+        return 0;
+    }
+    if (strcmp(command, "thermal-probe") == 0)
+    {
+        thermal_probe(client);
         return 0;
     }
     if (strcmp(command, "setting-set") == 0)
@@ -3052,20 +4166,31 @@ static int handle_command(int client, char *line, const char *body, size_t body_
         const char *const sub = strtok(NULL, " \t");
         if (sub != NULL && strcmp(sub, "set") == 0)
             fan_command(client, strtok(NULL, " \t"));
+        else if (sub != NULL && strcmp(sub, "hold") == 0)
+        {
+            const char *const temp = strtok(NULL, " \t");
+            fan_hold_command(client, temp, temp != NULL ? strtok(NULL, " \t") : NULL);
+        }
         else if (sub == NULL)
             fan_command(client, NULL);
         else
-            reply(client, "err usage: fan  (read duty) | fan set TEMP (30..90)");
+            reply(client,
+                  "err usage: fan (read duty) | fan set TEMP (30..90) | "
+                  "fan hold TEMP [SECS] | fan hold off");
         return 0;
     }
     if (strcmp(command, "beeper") == 0)
     {
         const char *const sub = strtok(NULL, " \t");
-        if (sub != NULL && (strcmp(sub, "mute") == 0 || strcmp(sub, "vol") == 0))
+        if (sub != NULL && strcmp(sub, "status") == 0)
+            beeper_command(client, sub, 0);
+        else if (sub != NULL &&
+                 (strcmp(sub, "mute") == 0 || strcmp(sub, "dim") == 0 || strcmp(sub, "vol") == 0))
         {
             const char *const value = strtok(NULL, " \t");
             if (value == NULL)
-                reply(client, "err usage: beeper mute 0|1 | beeper vol 0..2 | beeper [PATTERN]");
+                reply(client, "err usage: beeper mute 0|1 | beeper dim 0..2 (0 full, 2 softest) | "
+                              "beeper status | beeper [PATTERN]");
             else
                 beeper_command(client, sub, atoi(value));
         }
@@ -3195,39 +4320,71 @@ static int handle_command(int client, char *line, const char *body, size_t body_
         return 0;
     }
 
-    const char *const action = strtok(NULL, " \t");
+    // "pad [N] ACTION ...": N (1-4) picks the pad; without it, pad 1.
+    const char *action = strtok(NULL, " \t");
+    int n = 0;
+    if (action != NULL && action[0] >= '1' && action[0] <= '0' + PS5LOOP_PADS && action[1] == '\0')
+    {
+        n = action[0] - '1';
+        action = strtok(NULL, " \t");
+    }
+    pad_slot_t *const pad = &g_pad.slot[n];
     const char *arguments[7] = {0};
     int count = 0;
     while (count < 7 && (arguments[count] = strtok(NULL, " \t")) != NULL)
         count++;
     if (action == NULL)
     {
-        reply(client, "err usage: pad open|close|status|set|tap|handle|bind");
+        reply(client, "err usage: pad [1-4] open|close|status|set|tap|handle|bind|evict, or pad list");
+        return 0;
+    }
+    if (strcmp(action, "list") == 0)
+    {
+        char line[PS5LOOP_LINE - 64];
+        size_t used = 0;
+        for (int k = 0; k < PS5LOOP_PADS; k++)
+        {
+            const pad_slot_t *const slot = &g_pad.slot[k];
+            const int written =
+                slot->open ? snprintf(line + used, sizeof(line) - used,
+                                      " %d:open,device=0x%llx,user=0x%08x,last=0x%08x", k + 1,
+                                      (unsigned long long)slot->device_id, (uint32_t)slot->user_id,
+                                      (uint32_t)slot->last_insert)
+                           : snprintf(line + used, sizeof(line) - used, " %d:closed", k + 1);
+            if (written > 0 && used + (size_t)written < sizeof(line))
+                used += (size_t)written;
+        }
+        line[used] = '\0';
+        reply(client, "ok pads open=%d%s", pads_open(), line);
         return 0;
     }
     if (strcmp(action, "open") == 0)
     {
-        // "pad open [USER] [keep]": keep leaves real controllers connected.
-        const bool keep = (count > 0 && strcmp(arguments[0], "keep") == 0) ||
+        // "pad [N] open [USER] [keep]": keep leaves real controllers connected.
+        // Pads 2-4 always keep them: only pad 1 needs to be its user's first.
+        const bool keep = n > 0 || (count > 0 && strcmp(arguments[0], "keep") == 0) ||
                           (count > 1 && strcmp(arguments[1], "keep") == 0);
         const int32_t user =
             (count > 0 && strcmp(arguments[0], "keep") != 0) ? (int32_t)strtoul(arguments[0], NULL, 0) : -1;
-        const int status = pad_open(user, !keep, report, sizeof(report));
+        const int status = pad_open(n, user, !keep, report, sizeof(report));
         reply(client, "%s pad %s%s", status == 0 ? "ok" : "err", status == 0 ? "open " : "", report);
         return 0;
     }
     if (strcmp(action, "close") == 0)
     {
-        pad_close(report, sizeof(report));
+        if (count > 0 && strcmp(arguments[0], "all") == 0)
+            pad_close_all(report, sizeof(report));
+        else
+            pad_close(n, report, sizeof(report));
         reply(client, "ok pad closed %s", report);
         return 0;
     }
     if (strcmp(action, "status") == 0)
     {
-        reply(client, "ok pad %s handle=0x%x device=0x%llx user=0x%08x inserts=%u last=0x%08x",
-              g_pad.open ? "open" : "closed", (uint32_t)g_pad.handle,
-              (unsigned long long)g_pad.device_id, (uint32_t)g_pad.user_id, g_pad.inserts,
-              (uint32_t)g_pad.last_insert);
+        reply(client, "ok pad %d %s handle=0x%x device=0x%llx user=0x%08x inserts=%u last=0x%08x", n + 1,
+              pad->open ? "open" : "closed", (uint32_t)pad->handle,
+              (unsigned long long)pad->device_id, (uint32_t)pad->user_id, pad->inserts,
+              (uint32_t)pad->last_insert);
         return 0;
     }
     if (strcmp(action, "bind") == 0 && count >= 1)
@@ -3251,10 +4408,13 @@ static int handle_command(int client, char *line, const char *body, size_t body_
         // that place the virtual pad is the second, which no title opens:
         // disconnecting the real one (PS on it brings it back) leaves ours first.
         const uint64_t device_id = strtoull(arguments[0], NULL, 16);
+        bool ours = false;
+        for (int k = 0; k < PS5LOOP_PADS; k++)
+            ours = ours || (g_pad.slot[k].open && g_pad.slot[k].device_id == device_id);
         if (pad_libraries(report, sizeof(report)) != 0 || mbus_disconnect == NULL)
             reply(client, "err pad evict %s", report);
-        else if (device_id == 0 || device_id == g_pad.device_id)
-            reply(client, "err pad evict: name another device's id");
+        else if (device_id == 0 || ours)
+            reply(client, "err pad evict: name another device's id, not a virtual pad's");
         else
             reply(client, "ok pad evict device=0x%llx result=0x%08x",
                   (unsigned long long)device_id, (uint32_t)mbus_disconnect(device_id));
@@ -3268,17 +4428,18 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             return 0;
         }
         pthread_mutex_lock(&g_pad.lock);
-        pad_neutral(&g_pad.state);
-        g_pad.handle = (int32_t)strtoul(arguments[0], NULL, 0);
-        g_pad.open = true;
-        const int32_t result = pad_insert(g_pad.handle, &g_pad.state);
+        pad_neutral(&pad->state);
+        pad->handle = (int32_t)strtoul(arguments[0], NULL, 0);
+        pad->open = true;
+        const int32_t result = pad_insert(pad->handle, &pad->state);
         pthread_mutex_unlock(&g_pad.lock);
-        reply(client, "ok pad handle=0x%x insert=0x%08x", (uint32_t)g_pad.handle, (uint32_t)result);
+        reply(client, "ok pad %d handle=0x%x insert=0x%08x", n + 1, (uint32_t)pad->handle,
+              (uint32_t)result);
         return 0;
     }
-    if (!g_pad.open)
+    if (!pad->open)
     {
-        reply(client, "err pad %s: the pad is not open", action);
+        reply(client, "err pad %d %s: that pad is not open", n + 1, action);
         return 0;
     }
     if (strcmp(action, "set") == 0 && count == 7)
@@ -3293,7 +4454,7 @@ static int handle_command(int client, char *line, const char *body, size_t body_
                 return 0;
             }
         }
-        pad_hold((uint32_t)strtoul(arguments[0], NULL, 16), axes[0], axes[1], axes[2], axes[3],
+        pad_hold(n, (uint32_t)strtoul(arguments[0], NULL, 16), axes[0], axes[1], axes[2], axes[3],
                  axes[4], axes[5]);
         reply(client, "ok pad set");
         return 0;
@@ -3306,8 +4467,8 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             reply(client, "err pad tap: hold 1 to 10000 ms");
             return 0;
         }
-        pad_tap((uint32_t)strtoul(arguments[0], NULL, 16), hold_ms);
-        reply(client, "ok pad tap last=0x%08x", (uint32_t)g_pad.last_insert);
+        pad_tap(n, (uint32_t)strtoul(arguments[0], NULL, 16), hold_ms);
+        reply(client, "ok pad tap last=0x%08x", (uint32_t)pad->last_insert);
         return 0;
     }
     reply(client, "err usage: pad %s", action);
@@ -3408,6 +4569,9 @@ int main(int argc, char *argv[])
     else
         log_line("ps5loop: no led thread: %s", strerror(errno));
     log_line("ps5loop: listening");
+    pthread_t announcer;
+    if (pthread_create(&announcer, NULL, announce_thread, (void *)(uintptr_t)port) == 0)
+        pthread_detach(announcer);
     for (;;)
     {
         const int client = accept(server, NULL, NULL);

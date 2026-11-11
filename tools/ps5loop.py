@@ -11,8 +11,12 @@ Commands:
   open [USERID]         create the virtual pad, give it to the foreground user, close
                         the prompt the console raises, and disconnect any real
                         controller so that titles read the pad
-  close                 remove it
+  close [--all]         remove it (--all: every virtual pad)
   status                the pad's handle, device, user and last insert result
+  pads                  every virtual pad's state. Up to 4 pads: --pad N (1-4) on open,
+                        close, status, press, hold, release and seq picks one; pads 2-4
+                        go to the next signed-in user without a pad and never
+                        disconnect a real controller
   press BUTTONS [--ms]  press and release: "cross", "l1+r1", "down"
   hold BUTTONS [--lx ..] hold buttons, sticks (0-255, 128 centre) and triggers
   release               let everything go
@@ -49,12 +53,19 @@ Commands:
   rest / reboot / power-off   put the console in rest mode, reboot, or power off
   uninstall TITLE_ID    uninstall a title (registered titles; irreversible)
   notify TYPE MESSAGE   show a message: TYPE is toast (banner) or flyout (card)
-  hwinfo                model, serial, temperatures and cpu clock
+  trophy GRADE NAME     a notification in the trophy style (bronze, silver, gold,
+                        platinum; --sub sets the second line); nothing is unlocked
+  hwinfo                model, serial, version, SoC id, temperatures, cpu clock and
+                        mode, cores, uptime, fan and SoC power
+  hwdetail              JSON: ICC boot counts, operating time, error and event logs,
+                        boot-stage times, secure clock, SMU clock table, system facts
+  display               JSON: the HDMI sink's raw EDID and monitor-info record
   df                    free space per mounted volume
   led ...               indicator LED: BLUE WHITE AMBER | off | auto | breathe B W A [MS] | chase [MS]
   lightbar R G B        attempt the physical DualSense lightbar (SceShellUI owns the pad)
   fan [TEMP]            read the fan duty, or set the threshold (30..90 C)
-  beeper [PATTERN|mute 0|1|vol 0..2]   beep, mute, or set the beeper volume
+  beeper [PATTERN|mute 0|1|dim 0..2|status]   beep, mute, set the beeper's dim level
+                        (0 full, 1 soft, 2 softest; vol is an alias), or read them
   kill PID              end a process by pid
   peek PID ADDR LEN     read a process's memory (prints hex + ascii)
   poke PID ADDR HEX     write a hex string into a process's memory (verified)
@@ -190,11 +201,19 @@ def command(line, timeout=30.0, payload=False):
         return answer, rest[:size]
 
 
+def pad_word(args):
+    """The command prefix for the pad --pad names: "pad" for pad 1, "pad N" otherwise."""
+    n = getattr(args, "pad", 1) or 1
+    return "pad" if n == 1 else f"pad {n}"
+
+
 def open_pad(args):
     """Create the pad, close the console's prompt, and (unless --beside) make the
     pad its user's first by disconnecting any real controller. The eviction runs
-    in the payload, off the console's own kernel log, so it needs no klog server."""
-    line = "pad open"
+    in the payload, off the console's own kernel log, so it needs no klog server.
+    Pads 2-4 (--pad) go to the next signed-in user without one and never disconnect
+    a controller."""
+    line = f"{pad_word(args)} open"
     if args.user:
         line += f" {args.user}"
     if args.beside:
@@ -207,7 +226,7 @@ def open_pad(args):
         # The console asks who the new controller belongs to although it is bound
         # already; Circle, from the pad itself, closes the question.
         time.sleep(1.5)
-        command(f"pad tap {BUTTONS['circle']:x} 80")
+        command(f"{pad_word(args)} tap {BUTTONS['circle']:x} 80")
     return 0
 
 
@@ -313,7 +332,7 @@ def sequence(args):
         if name == "wait":
             time.sleep(int(value or 500) / 1000)
             continue
-        answer, _ = command(f"pad tap {mask(name):x} {int(value or args.ms)}")
+        answer, _ = command(f"{pad_word(args)} tap {mask(name):x} {int(value or args.ms)}")
         if not answer.startswith("ok"):
             return say(answer)
         time.sleep(args.gap / 1000)
@@ -463,8 +482,10 @@ def main():
                          help="leave the console's \"Who's using this controller?\" prompt up")
     opening.add_argument("--beside", action="store_true",
                          help="leave a real controller connected (titles then read it, not the pad)")
-    commands.add_parser("close")
-    commands.add_parser("status")
+    closing = commands.add_parser("close")
+    closing.add_argument("--all", action="store_true", help="close every virtual pad")
+    status = commands.add_parser("status")
+    commands.add_parser("pads", help="every virtual pad's state (up to 4)")
     press = commands.add_parser("press")
     press.add_argument("buttons")
     press.add_argument("--ms", type=int, default=80)
@@ -477,6 +498,10 @@ def main():
     steps.add_argument("steps", nargs="+")
     steps.add_argument("--ms", type=int, default=80, help="how long each press is held")
     steps.add_argument("--gap", type=int, default=250, help="the pause after each press")
+    release = commands.choices["release"]
+    for sub in (opening, closing, status, press, hold, release, steps):
+        sub.add_argument("--pad", type=int, choices=range(1, 5), default=1,
+                         help="which virtual pad, 1-4 (default 1)")
     screenshot = commands.add_parser("screenshot")
     screenshot.add_argument("file", nargs="?")
     screenshot.add_argument("--hold", type=int, default=0, help="how long Create is held, in ms")
@@ -533,7 +558,13 @@ def main():
     notifying = commands.add_parser("notify")
     notifying.add_argument("type", choices=["toast", "flyout"])
     notifying.add_argument("message", nargs="+")
+    trophying = commands.add_parser("trophy")
+    trophying.add_argument("grade", choices=["bronze", "silver", "gold", "platinum"])
+    trophying.add_argument("name", nargs="+")
+    trophying.add_argument("--sub", default="", help="the second line (default: DevLoop)")
     commands.add_parser("hwinfo")
+    commands.add_parser("hwdetail")
+    commands.add_parser("display")
     commands.add_parser("df")
     commands.add_parser("led").add_argument("args", nargs="+",
         help="BLUE WHITE AMBER | off | auto | breathe B W A [MS] | chase [MS]")
@@ -543,7 +574,7 @@ def main():
     lightbar.add_argument("b", type=int)
     fanning = commands.add_parser("fan")
     fanning.add_argument("temp", nargs="?", help="omit to read; a number to set the threshold (30..90)")
-    commands.add_parser("beeper").add_argument("args", nargs="*", help="[PATTERN] | mute 0|1 | vol 0..2")
+    commands.add_parser("beeper").add_argument("args", nargs="*", help="[PATTERN] | mute 0|1 | dim 0..2 (0 full, 2 softest) | status")
     commands.add_parser("kill").add_argument("pid")
     peeking = commands.add_parser("peek")
     peeking.add_argument("pid")
@@ -658,8 +689,17 @@ def main():
         return say(command(f"uninstall {args.title_id}")[0])
     if args.command == "notify":
         return say(command(f"notify {args.type} {' '.join(args.message)}")[0])
+    if args.command == "trophy":
+        name = " ".join(args.name).replace("|", "/")
+        return say(command(f"trophy {args.grade} {name}" + (f"|{args.sub}" if args.sub else ""))[0])
     if args.command == "hwinfo":
         return say(command("hwinfo")[0])
+    if args.command in ("hwdetail", "display"):
+        answer, data = command(args.command, payload=True)
+        if not answer.startswith("ok file"):
+            return say(answer)
+        print(data.decode("utf-8", "replace"))
+        return 0
     if args.command == "df":
         return fetch_text("df")
     if args.command == "led":
@@ -727,15 +767,16 @@ def main():
         print(f"ok http {len(data)} bytes ({first}) -> {out}")
         return 0
     if args.command == "press":
-        return say(command(f"pad tap {mask(args.buttons):x} {args.ms}")[0])
+        return say(command(f"{pad_word(args)} tap {mask(args.buttons):x} {args.ms}")[0])
     if args.command == "hold":
         buttons = mask(args.buttons) if args.buttons else 0
-        return say(command(f"pad set {buttons:x} {args.lx} {args.ly} {args.rx} {args.ry} "
+        return say(command(f"{pad_word(args)} set {buttons:x} {args.lx} {args.ly} {args.rx} {args.ry} "
                            f"{args.l2} {args.r2}")[0])
     if args.command == "release":
-        return say(command("pad set 0 128 128 128 128 0 0")[0])
-    line = {"ping": "ping", "list-captures": "list-captures", "status": "pad status",
-            "close": "pad close", "raw": " ".join(getattr(args, "words", []))}[args.command]
+        return say(command(f"{pad_word(args)} set 0 128 128 128 128 0 0")[0])
+    line = {"ping": "ping", "list-captures": "list-captures", "status": f"{pad_word(args)} status",
+            "close": "pad close all" if getattr(args, "all", False) else f"{pad_word(args)} close",
+            "pads": "pad list", "raw": " ".join(getattr(args, "words", []))}[args.command]
     return say(command(line)[0])
 
 

@@ -10,6 +10,10 @@ you would rather view it on localhost, or keep the console's address out of the
 browser. It forwards each request to the payload and relays the reply.
 
   tools/ps5web.py [--port N]     -> http://127.0.0.1:8099
+  tools/ps5web.py --html tools/ps5web.html
+                                 serve that page instead of the console's copy
+                                 (the API still goes to the console), to try a
+                                 dashboard edit without rebuilding the payload
 
 The console's address comes from PS5_HOST or .env, as ps5loop does; it is never
 sent to the browser.
@@ -48,7 +52,12 @@ def fetch(path):
 
 
 class Handler(BaseHTTPRequestHandler):
+    page = None  # a local dashboard to serve at /, read on every request
+
     def do_GET(self):
+        if self.page is not None and self.path.split("?")[0] in ("/", "/index.html"):
+            self._send(200, "text/html; charset=utf-8", self.page.read_bytes())
+            return
         try:
             status, headers, body = fetch(self.path)
         except (OSError, SystemExit) as error:
@@ -73,8 +82,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--port", type=int, default=8099)
+    parser.add_argument("--html", type=Path, help="serve this page at / instead of the console's")
     args = parser.parse_args()
     console_host()  # fail early, before the browser opens, if no host is set
+    if args.html is not None:
+        if not args.html.is_file():
+            raise SystemExit(f"ps5web: no such page: {args.html}")
+        Handler.page = args.html.resolve()
     server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"PS5 DevLoop dashboard (proxy): http://127.0.0.1:{args.port}  (Ctrl+C to stop)")
     try:
