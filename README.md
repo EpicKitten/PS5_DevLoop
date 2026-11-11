@@ -7,9 +7,11 @@
 see the screen, repeat.**
 
 > [!NOTE]
-> **This is 100% vibecoded.** The code and the documentation were written by an
-> AI agent, checked against a real console rather than reviewed line by line.
-> Read it with that in mind before you run it on yours.
+> **This fork's changes are 100% vibecoded.** DevLoop itself is
+> [Gary Riches' project](https://github.com/griches/PS5_DevLoop); everything this
+> fork adds to it, code and documentation, was written by an AI agent and checked
+> against a real console rather than reviewed line by line. Read it with that in
+> mind before you run it on yours.
 
 Porting homebrew to the PS5 has had a gap in the middle of every loop. A machine
 can build a title, deploy it, launch it and read its log, but it cannot press
