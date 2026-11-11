@@ -171,6 +171,51 @@
   .cluster .c-ci { grid-area: 2 / 3; } .cluster .c-cr { grid-area: 3 / 2; }
   /* virtual sticks: drag the knob; letting go centres it */
   .sticks { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; justify-items: center; margin: 12px 0 4px; }
+  /* the DualSense layout: six columns so the sticks sit inward of the D-pad and the face
+     buttons (as on the controller), the middle buttons between them */
+  .ds { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 10px 6px; align-items: center;
+    justify-items: center; margin: 12px 0 6px; padding: 12px 10px 10px; border: 1px solid var(--line);
+    border-radius: 26px 26px 60px 60px; background: radial-gradient(120% 90% at 50% 0%, #1a2538, #0f1623); }
+  .ds-lsh { grid-area: 1 / 1 / 2 / 3; justify-self: stretch; }
+  .ds-rsh { grid-area: 1 / 5 / 2 / 7; justify-self: stretch; }
+  .ds-top { grid-area: 1 / 3 / 2 / 5; align-self: end; justify-self: stretch; display: flex; justify-content: space-between; }
+  .ds-dpad { grid-area: 2 / 1 / 4 / 3; }
+  .ds-face { grid-area: 2 / 5 / 4 / 7; }
+  .ds-mid { grid-area: 2 / 3 / 3 / 5; justify-self: stretch; display: flex; }
+  .ds-ps { grid-area: 3 / 3 / 4 / 5; }
+  .ds-lstick { grid-area: 4 / 2 / 5 / 4; }
+  .ds-rstick { grid-area: 4 / 4 / 5 / 6; }
+  .ds-sh { display: flex; flex-direction: column; gap: 5px; }
+  .ds-rsh { align-items: flex-end; } .ds-lsh { align-items: flex-start; }
+  .ds-trig { display: flex; align-items: center; gap: 6px; width: 100%; }
+  .ds-rsh .ds-trig { justify-content: flex-end; }
+  .ds-trig input[type=range] { flex: 1 1 40px; min-width: 24px; padding: 0; border: 0; background: none; accent-color: var(--accent); }
+  .ds-trig b { font-size: 11px; font-variant-numeric: tabular-nums; min-width: 22px; text-align: center; color: var(--muted); }
+  .ds-l2, .ds-r2 { padding: 4px 8px; font-size: 12px; border-radius: 12px 12px 6px 6px; }
+  .ds-bumper { padding: 3px 18px; font-size: 12px; border-radius: 10px 10px 4px 4px; }
+  .ds .cluster { grid-template-columns: repeat(3, 36px); grid-template-rows: repeat(3, 36px); gap: 3px; }
+  .ds .cluster button { width: 36px; height: 36px; }
+  .ds-face button { border-radius: 50%; }
+  .ds-face .c-tri { color: #6fd6c0; } .ds-face .c-ci { color: #ff7a8a; }
+  .ds-face .c-cr { color: #8fb4ff; } .ds-face .c-sq { color: #e79be8; }
+  .ds-small { padding: 3px 6px; font-size: 10px; border-radius: 6px; }
+  .ds-touch { padding: 16px 4px; font-size: 11px; border-radius: 8px 8px 14px 14px; flex: 1 1 auto; min-width: 0; }
+  .ds-psb { width: 34px; height: 34px; padding: 0; border-radius: 50%; font-size: 11px; font-weight: 700; }
+  .ds .stick { width: 92px; height: 92px; }
+  .ds .stick .knob { width: 38px; height: 38px; margin: -19px 0 0 -19px; }
+  .ds .stick-col { gap: 4px; }
+  .ds .stick-col .hint b { font-size: 11px; }
+  /* a phone: a smaller pad, so the D-pad and face buttons keep clear of the touchpad */
+  @media (max-width: 480px) {
+    .ds { gap: 8px 4px; padding: 10px 6px 8px; border-radius: 20px 20px 44px 44px; }
+    .ds .cluster { grid-template-columns: repeat(3, 30px); grid-template-rows: repeat(3, 30px); gap: 2px; }
+    .ds .cluster button { width: 30px; height: 30px; font-size: 13px; }
+    .ds .stick { width: 80px; height: 80px; }
+    .ds-psb { width: 30px; height: 30px; }
+    .ds-small { padding: 2px 4px; font-size: 9px; }
+    .ds-touch { padding: 12px 2px; font-size: 10px; }
+    .ds-trig b { display: none; } /* room for the slider; its title shows the pull */
+  }
   .stick-col { display: flex; flex-direction: column; align-items: center; gap: 6px; }
   .stick-col .hint { margin: 0; } .stick-col b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 600; }
   .stick { width: 112px; height: 112px; border-radius: 50%; position: relative; touch-action: none; cursor: grab;
@@ -316,12 +361,12 @@
   <div id="charts-area">
   <div class="card timebar">
     <div class="seg" id="ranges">
-      <button data-win="5">5s</button><button data-win="30">30s</button><button data-win="60">1m</button><button data-win="300">5m</button><button data-win="900">15m</button><button data-win="3600">1h</button><button data-win="0">All</button>
+      <button title="Show the last 5 seconds (polls twice a second while live)" data-win="5">5s</button><button title="Show the last 30 seconds (polls twice a second while live)" data-win="30">30s</button><button title="Show the last minute" data-win="60">1m</button><button title="Show the last 5 minutes" data-win="300">5m</button><button title="Show the last 15 minutes" data-win="900">15m</button><button title="Show the last hour" data-win="3600">1h</button><button title="Show all the history kept (up to an hour)" data-win="0">All</button>
     </div>
     <div class="seg">
-      <button id="zoom-out" title="Zoom out">−</button><button id="zoom-in" title="Zoom in">+</button>
+      <button id="zoom-out" title="Zoom the charts out: twice the time range (Ctrl+wheel also zooms)">−</button><button id="zoom-in" title="Zoom the charts in: half the time range (or drag across a chart)">+</button>
     </div>
-    <button id="live" title="Follow the newest samples">● Live</button>
+    <button id="live" title="Follow the newest samples again after zooming or panning (double-click a chart does the same)">● Live</button>
     <span id="range-text"></span>
     <span class="hint">hover · drag to zoom · Ctrl+wheel zoom · Shift+wheel pan · double-click resets</span>
   </div>
@@ -381,13 +426,13 @@
     <div class="outhead">
       <h3 style="margin:0">Console output</h3>
       <div class="row" style="margin:0">
-        <button id="clear">Clear</button>
+        <button title="Clear the console output above (does not touch the console)" id="clear">Clear</button>
       </div>
     </div>
     <pre id="out">Ready. Commands run on the console through GET /api/run.</pre>
     <div class="row" style="margin-top:12px">
       <input id="raw" placeholder="any command, e.g. pad tap 4000 120">
-      <button class="go" onclick="runIf('raw', c => c)">Run</button>
+      <button title="Run the command line on the console as typed (Enter in the box does the same)" class="go" onclick="runIf('raw', c => c)">Run</button>
     </div>
     <div class="hint" style="margin-bottom:0">Runs verbatim through /api/run. Every command in AGENTS.md works here.</div>
   </div>
@@ -398,60 +443,60 @@
     <div data-sec="Control" class="pcard">
       <h3>Virtual pad <small>input</small></h3>
       <div class="row">
-        <button class="go" onclick="run('pad open')">Open</button>
-        <button onclick="run('pad open keep')">Open · beside</button>
-        <button onclick="run('pad close')">Close</button>
-        <button onclick="run('pad status')">Status</button>
+        <button title="Create the virtual DualSense and give it to the signed-in user; disconnects the real controller so titles read this one (PS on the real pad reconnects it)" class="go" onclick="run('pad open')">Open</button>
+        <button title="Create the virtual pad beside the real controller, which stays connected; works on the home screen, but titles read only the first controller" onclick="run('pad open keep')">Open · beside</button>
+        <button title="Remove the virtual pad; press PS on the real controller to reconnect it" onclick="run('pad close')">Close</button>
+        <button title="Show the virtual pad&#x27;s handle, device id, user and last input result" onclick="run('pad status')">Status</button>
       </div>
       <div class="hint">Open takes the controller from the player (unless · beside). A title needs the pad open before it reads a press.</div>
       <div class="row"><label>Hold</label>
         <input type="number" id="pad-ms" value="100" min="1" max="10000"> <span class="hint" style="margin:0">ms per tap</span>
       </div>
-      <div class="pad">
-        <div class="cluster">
-          <button class="c-up" onclick="tap('up')">▲</button>
-          <button class="c-left" onclick="tap('left')">◀</button>
-          <button class="c-right" onclick="tap('right')">▶</button>
-          <button class="c-down" onclick="tap('down')">▼</button>
+      <!-- laid out as a DualSense: shoulders on top, the D-pad and face buttons on the
+           wings, Create / touchpad / Options and PS in the middle, the sticks below -->
+      <div class="ds">
+        <div class="ds-sh ds-lsh">
+          <div class="ds-trig"><button class="ds-l2" onclick="tap('l2')" title="Tap L2 fully (use the slider beside it for a partial pull)">L2</button>
+            <input type="range" id="trig-l2" data-trig="0" min="0" max="255" value="0" aria-label="L2 pull" title="drag for a partial L2 pull"><b id="trig-l2-val">0</b></div>
+          <button title="Tap L1 (left bumper)" class="ds-bumper" onclick="tap('l1')">L1</button>
         </div>
-        <div class="cluster">
-          <button class="c-tri" onclick="tap('triangle')">△</button>
-          <button class="c-sq" onclick="tap('square')">□</button>
-          <button class="c-ci" onclick="tap('circle')">○</button>
-          <button class="c-cr" onclick="tap('cross')">✕</button>
+        <div class="ds-sh ds-rsh">
+          <div class="ds-trig"><b id="trig-r2-val">0</b><input type="range" id="trig-r2" data-trig="1" min="0" max="255" value="0" aria-label="R2 pull" title="drag for a partial R2 pull">
+            <button class="ds-r2" onclick="tap('r2')" title="Tap R2 fully (use the slider beside it for a partial pull)">R2</button></div>
+          <button title="Tap R1 (right bumper)" class="ds-bumper" onclick="tap('r1')">R1</button>
         </div>
-      </div>
-      <div class="sticks">
-        <div class="stick-col"><div class="stick" id="stick-l" data-side="l"><i class="knob"></i></div>
-          <span class="hint">L stick <b id="stick-l-val">128, 128</b></span></div>
-        <div class="stick-col"><div class="stick" id="stick-r" data-side="r"><i class="knob"></i></div>
-          <span class="hint">R stick <b id="stick-r-val">128, 128</b></span></div>
-      </div>
-      <div class="triggers">
-        <label for="trig-l2">L2</label><input type="range" id="trig-l2" data-trig="0" min="0" max="255" value="0"><b id="trig-l2-val">0</b>
-        <label for="trig-r2">R2</label><input type="range" id="trig-r2" data-trig="1" min="0" max="255" value="0"><b id="trig-r2-val">0</b>
+        <div class="cluster ds-dpad">
+          <button title="Tap D-pad up" class="c-up" onclick="tap('up')" aria-label="up">▲</button>
+          <button title="Tap D-pad left" class="c-left" onclick="tap('left')" aria-label="left">◀</button>
+          <button title="Tap D-pad right" class="c-right" onclick="tap('right')" aria-label="right">▶</button>
+          <button title="Tap D-pad down" class="c-down" onclick="tap('down')" aria-label="down">▼</button>
+        </div>
+        <div class="ds-top">
+          <button class="ds-small" onclick="tap('create')" title="Tap Create: a short press opens the Create menu (Circle closes it, and no screenshot works while it is open); use Screenshot to capture">Create</button>
+          <button title="Tap Options (in-game menu)" class="ds-small" onclick="tap('options')">Options</button>
+        </div>
+        <div class="ds-mid"><button title="Tap the touchpad button (a click, not a swipe)" class="ds-touch" onclick="tap('touchpad')">Touchpad</button></div>
+        <div class="ds-ps"><button title="Tap PS: opens the control centre (a long press is not sent)" class="ds-psb" onclick="tap('ps')" aria-label="PS button">PS</button></div>
+        <div class="cluster ds-face">
+          <button title="Tap Triangle" class="c-tri" onclick="tap('triangle')" aria-label="triangle">△</button>
+          <button title="Tap Square" class="c-sq" onclick="tap('square')" aria-label="square">□</button>
+          <button title="Tap Circle (back / cancel)" class="c-ci" onclick="tap('circle')" aria-label="circle">○</button>
+          <button title="Tap Cross (select / confirm)" class="c-cr" onclick="tap('cross')" aria-label="cross">✕</button>
+        </div>
+        <div class="stick-col ds-lstick"><div class="stick" id="stick-l" data-side="l"><i class="knob"></i></div>
+          <button class="mini" onclick="tap('l3')" title="Click the left stick (L3)">L3</button>
+          <span class="hint"><b id="stick-l-val">128, 128</b></span></div>
+        <div class="stick-col ds-rstick"><div class="stick" id="stick-r" data-side="r"><i class="knob"></i></div>
+          <button class="mini" onclick="tap('r3')" title="Click the right stick (R3)">R3</button>
+          <span class="hint"><b id="stick-r-val">128, 128</b></span></div>
       </div>
       <div class="row checks" style="justify-content:center">
         <label><input type="checkbox" id="trig-latch">keep triggers where I leave them</label>
-        <button class="mini" id="trig-release">Release</button>
-      </div>
-      <div class="pad-sys">
-        <button onclick="tap('l1')">L1</button>
-        <button onclick="tap('r1')">R1</button>
-        <button onclick="tap('l2')">L2</button>
-        <button onclick="tap('r2')">R2</button>
-        <button onclick="tap('l3')">L3</button>
-        <button onclick="tap('r3')">R3</button>
-      </div>
-      <div class="pad-sys">
-        <button onclick="tap('options')">Options</button>
-        <button onclick="tap('touchpad')">Touchpad</button>
-        <button onclick="tap('create')">Create</button>
-        <button onclick="tap('ps')">PS</button>
+        <button title="Let go of both triggers (L2 and R2 back to 0)" class="mini" id="trig-release">Release</button>
       </div>
       <div class="row" style="margin-top:14px"><label>Type</label>
         <input id="kb-text" placeholder="text for the on-screen keyboard" autocomplete="off" spellcheck="false">
-        <button class="go" id="kb-go" onclick="typeText()">Type</button></div>
+        <button title="Type the text into the console&#x27;s on-screen keyboard, key by key; while typing, this button (or Enter) stops it" class="go" id="kb-go" onclick="typeText()">Type</button></div>
       <div class="row checks">
         <label><input type="checkbox" id="kb-open" checked>press ✕ first to open the keyboard</label>
         <label><input type="checkbox" id="kb-empty" checked>the field is empty</label>
@@ -467,15 +512,15 @@
     <div data-sec="Control" class="pcard">
       <h3>Sight <small>frame &amp; screenshot</small></h3>
       <div class="row">
-        <button class="go" onclick="run('screenshot')">Screenshot</button>
-        <button onclick="run('latest-capture')">Latest capture</button>
-        <button onclick="loadGallery()">Captures gallery</button>
+        <button title="Take the console&#x27;s own screenshot (holds Create 1.2 s, about 3 s): the whole screen, system UI included; the capture is deleted afterwards" class="go" onclick="run('screenshot')">Screenshot</button>
+        <button title="Show the newest picture in the console&#x27;s captures, without pressing anything" onclick="run('latest-capture')">Latest capture</button>
+        <button title="List the pictures in the console&#x27;s captures, to view any of them" onclick="loadGallery()">Captures gallery</button>
       </div>
       <div class="hint">Screenshot needs the pad open (it holds Create). The whole screen; ~3 s. Pictures appear at the bottom of this card; HDR captures (JXR) are decoded in the page.</div>
       <div id="gallery" class="gallery"></div>
       <div class="row"><label>Request</label><input id="fr-req" placeholder="/data/homebrew/PPSA.../devloop-shot"></div>
       <div class="row"><label>Folder</label><input id="fr-dir" placeholder="/data/homebrew/PPSA.../screenshots"></div>
-      <div class="row"><button class="go wide" onclick="frame()">Frame (title's own)</button></div>
+      <div class="row"><button title="Ask the running title for its own frame (about 1 s; needs the title&#x27;s hook and a titles.json entry)" class="go wide" onclick="frame()">Frame (title's own)</button></div>
       <div id="shot"></div>
     </div>
 
@@ -483,43 +528,43 @@
     <div data-sec="Control" class="pcard">
       <h3>Apps &amp; system</h3>
       <div class="row">
-        <button onclick="run('ps')">ps</button>
-        <button onclick="run('locate-title')">locate-title</button>
-        <button onclick="run('df')">df</button>
-        <button onclick="run('hwinfo')">hwinfo</button>
-        <button onclick="run('settings')">settings</button>
+        <button title="List the console&#x27;s processes with their app and title ids" onclick="run('ps')">ps</button>
+        <button title="Show the foreground app&#x27;s ids: app id, pid, title id" onclick="run('locate-title')">locate-title</button>
+        <button title="Free space on each mounted volume" onclick="run('df')">df</button>
+        <button title="One-line hardware reading: model, temperatures, clocks, fan, SoC power" onclick="run('hwinfo')">hwinfo</button>
+        <button title="Read the system registry (settings) as JSON" onclick="run('settings')">settings</button>
       </div>
       <div class="row"><label>Launch</label><input id="app-launch" placeholder="PPSA00000">
-        <button onclick="runIf('app-launch', id => 'launch ' + id)">Go</button></div>
+        <button title="Launch the installed title with this title id (registered titles, not homebrew run by a loader)" onclick="runIf('app-launch', id => 'launch ' + id)">Go</button></div>
       <div class="row"><label>Close</label><input id="app-close" placeholder="app id (blank = foreground)">
-        <button onclick="run('close-app ' + val('app-close'))">Go</button></div>
+        <button title="Close the app with this app id (from ps); blank closes the foreground app" onclick="run('close-app ' + val('app-close'))">Go</button></div>
       <div class="row"><label>URL</label><input id="app-url" placeholder="https://example.com">
-        <button onclick="runIf('app-url', u => 'open-url ' + u)">Open</button></div>
+        <button title="Open this URL in the console&#x27;s web browser" onclick="runIf('app-url', u => 'open-url ' + u)">Open</button></div>
       <div class="row"><label>Notify</label>
         <select id="nt-type"><option value="toast">toast</option><option value="flyout">flyout</option></select>
         <input id="nt-msg" placeholder="message">
-        <button onclick="runIf('nt-msg', m => 'notify ' + val('nt-type') + ' ' + m)">Send</button></div>
+        <button title="Show this message on the console&#x27;s screen, as a toast (banner) or a flyout (card)" onclick="runIf('nt-msg', m => 'notify ' + val('nt-type') + ' ' + m)">Send</button></div>
       <div class="row"><label>Install</label><input id="app-pkg" placeholder="/path/to.pkg">
-        <button class="danger" onclick="runIf('app-pkg', p => 'install ' + p, 'Install this package?')">Install</button></div>
+        <button title="Install a .pkg file already on the console (asks first)" class="danger" onclick="runIf('app-pkg', p => 'install ' + p, 'Install this package?')">Install</button></div>
       <div class="row"><label>Remove</label><input id="app-uninstall" placeholder="PPSA00000">
-        <button class="danger" onclick="runIf('app-uninstall', id => 'uninstall ' + id, 'Uninstall this title? This cannot be undone.')">Uninstall</button></div>
+        <button title="Uninstall the title with this id: removes it from the console and cannot be undone (asks first)" class="danger" onclick="runIf('app-uninstall', id => 'uninstall ' + id, 'Uninstall this title? This cannot be undone.')">Uninstall</button></div>
     </div>
 
     <!-- files -->
     <div data-sec="Control" class="pcard">
       <h3>Files</h3>
       <div class="row"><label>ls</label><input id="f-ls" value="/" placeholder="/path">
-        <button onclick="runIf('f-ls', p => 'ls ' + p)">List</button></div>
+        <button title="List this console folder" onclick="runIf('f-ls', p => 'ls ' + p)">List</button></div>
       <div class="row"><label>get</label><input id="f-get" placeholder="/path/to/file">
-        <button onclick="getFile()">Download</button></div>
+        <button title="Download this console file to your computer" onclick="getFile()">Download</button></div>
       <div class="row"><label>hash</label><input id="f-hash" placeholder="/path/to/file">
-        <button onclick="runIf('f-hash', p => 'hash ' + p)">SHA-256</button></div>
+        <button title="SHA-256 of this console file, to check a transfer without downloading it" onclick="runIf('f-hash', p => 'hash ' + p)">SHA-256</button></div>
       <div class="row"><label>mv</label><input id="f-mv-a" placeholder="/from"><input id="f-mv-b" placeholder="/to">
-        <button onclick="run('mv ' + val('f-mv-a') + ' ' + val('f-mv-b'))">Move</button></div>
+        <button title="Move or rename a console file, from the first path to the second" onclick="run('mv ' + val('f-mv-a') + ' ' + val('f-mv-b'))">Move</button></div>
       <div class="row"><label>rm</label><input id="f-rm" placeholder="/path">
-        <button class="danger" onclick="runIf('f-rm', p => 'rm ' + p, 'Delete this file?')">Delete</button></div>
+        <button title="Delete this console file (asks first; there is no undo)" class="danger" onclick="runIf('f-rm', p => 'rm ' + p, 'Delete this file?')">Delete</button></div>
       <div class="row"><label>capture</label><input id="f-delcap" placeholder="/user/av_contents/...">
-        <button class="danger" onclick="runIf('f-delcap', p => 'delete-capture ' + p, 'Delete this capture (file, thumbnail, row)?')">delete-capture</button></div>
+        <button title="Delete a capture the way the gallery does: file, thumbnail and database row together (asks first)" class="danger" onclick="runIf('f-delcap', p => 'delete-capture ' + p, 'Delete this capture (file, thumbnail, row)?')">delete-capture</button></div>
       <div class="hint">put (upload) is CLI-only. Downloads open in a new tab.</div>
     </div>
 
@@ -531,37 +576,37 @@
         <input type="number" id="led-b" value="0" min="0" max="255">
         <input type="number" id="led-w" value="0" min="0" max="255">
         <input type="number" id="led-a" value="0" min="0" max="255">
-        <button onclick="run('led ' + val('led-b') + ' ' + val('led-w') + ' ' + val('led-a'))">Set</button></div>
+        <button title="Hold the indicator light at these blue, white and amber levels (0-255)" onclick="run('led ' + val('led-b') + ' ' + val('led-w') + ' ' + val('led-a'))">Set</button></div>
       <div class="row">
-        <button onclick="run('led off')">Off</button>
-        <button onclick="run('led auto')">Auto</button>
-        <button onclick="run('led breathe ' + val('led-b') + ' ' + val('led-w') + ' ' + val('led-a'))">Breathe</button>
-        <button onclick="run('led chase')">Chase</button>
+        <button title="Turn the indicator light off" onclick="run('led off')">Off</button>
+        <button title="Give the indicator light back to the system" onclick="run('led auto')">Auto</button>
+        <button title="Pulse the indicator light slowly in these blue, white and amber levels" onclick="run('led breathe ' + val('led-b') + ' ' + val('led-w') + ' ' + val('led-a'))">Breathe</button>
+        <button title="Cycle the indicator light through its colours" onclick="run('led chase')">Chase</button>
       </div>
       <div class="row"><label>Fan</label>
-        <button onclick="run('fan')">Read duty</button>
+        <button title="Read the fan&#x27;s current duty" onclick="run('fan')">Read duty</button>
         <input type="number" id="fan-t" value="60" min="30" max="90">
-        <button onclick="run('fan set ' + val('fan-t'))">Set °C</button></div>
+        <button title="Set the fan&#x27;s manual threshold once (30-90 °C); the system soon reverts it, so use Hold to keep it" onclick="run('fan set ' + val('fan-t'))">Set °C</button></div>
       <div class="row"><label>Hold</label>
         <span class="hint" style="margin:0">every</span>
         <input type="number" id="fan-secs" value="7" min="1" max="3600">
         <span class="hint" style="margin:0">s</span>
-        <button class="go" onclick="run('fan hold ' + val('fan-t') + ' ' + val('fan-secs'))">Hold °C</button>
-        <button onclick="run('fan hold off')">Stop</button>
-        <button onclick="run('fan hold')">Status</button></div>
+        <button title="Keep re-applying the fan threshold every so many seconds, so the system cannot revert it" class="go" onclick="run('fan hold ' + val('fan-t') + ' ' + val('fan-secs'))">Hold °C</button>
+        <button title="Stop holding the fan threshold; the system takes the fan back" onclick="run('fan hold off')">Stop</button>
+        <button title="Is the fan threshold being held, and at what" onclick="run('fan hold')">Status</button></div>
       <div class="hint">Set °C is one-shot — the system reverts it. Hold re-applies the threshold every few seconds so it sticks.</div>
       <div class="row"><label>Beeper</label>
         <input type="number" id="beep-p" value="1" min="1" max="9">
-        <button onclick="run('beeper ' + val('beep-p'))">Beep</button>
-        <button onclick="run('beeper mute 1')">Mute</button>
-        <button onclick="run('beeper mute 0')">Unmute</button>
+        <button title="Sound the console&#x27;s beeper with this pattern" onclick="run('beeper ' + val('beep-p'))">Beep</button>
+        <button title="Mute the console&#x27;s beeper (a lasting setting)" onclick="run('beeper mute 1')">Mute</button>
+        <button title="Unmute the console&#x27;s beeper" onclick="run('beeper mute 0')">Unmute</button>
         <select id="beep-v"><option>0</option><option>1</option><option selected>2</option></select>
-        <button onclick="run('beeper vol ' + val('beep-v'))">Vol</button></div>
+        <button title="Set the beeper volume (0-2; a lasting setting)" onclick="run('beeper vol ' + val('beep-v'))">Vol</button></div>
       <div class="row"><label>Lightbar</label>
         <input type="number" id="lb-r" value="0" min="0" max="255">
         <input type="number" id="lb-g" value="0" min="0" max="255">
         <input type="number" id="lb-b" value="0" min="0" max="255">
-        <button onclick="run('lightbar ' + val('lb-r') + ' ' + val('lb-g') + ' ' + val('lb-b'))">Try</button></div>
+        <button title="Try to colour the real controller&#x27;s light bar (usually refused: the system owns the pad)" onclick="run('lightbar ' + val('lb-r') + ' ' + val('lb-g') + ' ' + val('lb-b'))">Try</button></div>
       <div class="hint">Lightbar is a diagnostic: SceShellUI owns the pad, so it is expected to report ALREADY_OPENED.</div>
     </div>
 
@@ -569,44 +614,44 @@
     <div data-sec="Control" class="pcard">
       <h3>Process &amp; memory <small>advanced</small></h3>
       <div class="row"><label>modules</label><input id="m-mods" placeholder="pid">
-        <button onclick="runIf('m-mods', p => 'modules ' + p)">List</button></div>
+        <button title="List every module loaded in this process (handle, base, entry)" onclick="runIf('m-mods', p => 'modules ' + p)">List</button></div>
       <div class="row"><label>module</label><input id="m-mod-p" type="number" placeholder="pid"><input id="m-mod-n" placeholder="name">
-        <button onclick="run('module ' + val('m-mod-p') + ' ' + val('m-mod-n'))">Map</button></div>
+        <button title="Where this module is mapped in that process" onclick="run('module ' + val('m-mod-p') + ' ' + val('m-mod-n'))">Map</button></div>
       <div class="row"><label>dlsym</label><input id="m-dl-p" type="number" placeholder="pid"><input id="m-dl-n" placeholder="module"><input id="m-dl-s" placeholder="symbol">
-        <button onclick="run('dlsym ' + val('m-dl-p') + ' ' + val('m-dl-n') + ' ' + val('m-dl-s'))">Resolve</button></div>
+        <button title="Resolve a symbol&#x27;s address in that process&#x27;s module" onclick="run('dlsym ' + val('m-dl-p') + ' ' + val('m-dl-n') + ' ' + val('m-dl-s'))">Resolve</button></div>
       <div class="row"><label>call</label><input id="m-call" placeholder="pid addr [arg0..arg5]">
-        <button class="danger" onclick="runIf('m-call', a => 'call ' + a, 'Call a function in that process?')">call</button></div>
+        <button title="Call a function inside another process (up to 6 integer arguments) and show its return value; can crash that process (asks first)" class="danger" onclick="runIf('m-call', a => 'call ' + a, 'Call a function in that process?')">call</button></div>
       <div class="row"><label>peek</label><input id="m-peek" placeholder="pid addr len">
-        <button onclick="runIf('m-peek', a => 'peek ' + a)">Read</button></div>
+        <button title="Read bytes from a process&#x27;s memory" onclick="runIf('m-peek', a => 'peek ' + a)">Read</button></div>
       <div class="row"><label>poke</label><input id="m-poke" placeholder="pid addr hex">
-        <button class="danger" onclick="runIf('m-poke', a => 'poke ' + a, 'Write that process memory?')">Write</button></div>
+        <button title="Write bytes into a process&#x27;s memory, read back to verify; a wrong address can crash it (asks first)" class="danger" onclick="runIf('m-poke', a => 'poke ' + a, 'Write that process memory?')">Write</button></div>
       <div class="row"><label>scan</label><input id="m-scan" placeholder="pid addr len width value">
-        <button onclick="runIf('m-scan', a => 'scan ' + a)">int</button>
+        <button title="Search a span of a process&#x27;s memory for an integer of the given width" onclick="runIf('m-scan', a => 'scan ' + a)">int</button>
         <input id="m-aob" placeholder="pid addr len pattern">
-        <button onclick="runIf('m-aob', a => 'scan-aob ' + a)">aob</button></div>
+        <button title="Search a span of a process&#x27;s memory for a byte pattern (?? matches any byte)" onclick="runIf('m-aob', a => 'scan-aob ' + a)">aob</button></div>
       <div class="row"><label>kern</label><input id="m-kr" placeholder="addr len">
-        <button onclick="runIf('m-kr', a => 'kern-read ' + a)">read</button>
+        <button title="Read kernel memory at an absolute address" onclick="runIf('m-kr', a => 'kern-read ' + a)">read</button>
         <input id="m-kw" placeholder="addr hex">
-        <button class="danger" onclick="runIf('m-kw', a => 'kern-write ' + a, 'Write kernel memory?')">write</button></div>
+        <button title="Write kernel memory at an absolute address, read back to verify; a wrong write can panic the console (asks first)" class="danger" onclick="runIf('m-kw', a => 'kern-write ' + a, 'Write kernel memory?')">write</button></div>
       <div class="row"><label>exec</label><input id="m-exec" placeholder="/path [args]">
-        <button class="danger" onclick="runIf('m-exec', a => 'exec ' + a, 'Run that binary on the console?')">Run</button></div>
+        <button title="Run a binary on the console and show its output and exit code (asks first)" class="danger" onclick="runIf('m-exec', a => 'exec ' + a, 'Run that binary on the console?')">Run</button></div>
       <div class="row"><label>kill</label><input id="m-kill" type="number" placeholder="pid">
-        <button class="danger" onclick="runIf('m-kill', p => 'kill ' + p, 'Kill that process?')">Kill</button></div>
+        <button title="End this process; unsaved work in it is lost (asks first)" class="danger" onclick="runIf('m-kill', p => 'kill ' + p, 'Kill that process?')">Kill</button></div>
       <div class="row"><label>setting</label><input id="m-set" placeholder="regId value">
-        <button class="danger" onclick="runIf('m-set', a => 'setting-set ' + a, 'Write that system setting?')">setting-set</button></div>
+        <button title="Write one integer system setting by its regId, read back to verify; a wrong value can misconfigure the console (asks first)" class="danger" onclick="runIf('m-set', a => 'setting-set ' + a, 'Write that system setting?')">setting-set</button></div>
       <div class="row"><label>klog</label><input id="m-klog" type="number" value="1500" min="1" max="15000">
-        <button onclick="run('kernel-log ' + val('m-klog'))">Dump</button>
+        <button title="Capture the kernel log for this many milliseconds" onclick="run('kernel-log ' + val('m-klog'))">Dump</button>
         <label>http</label><input id="m-http" placeholder="http://...">
-        <button onclick="runIf('m-http', u => 'http ' + u)">Fetch</button></div>
+        <button title="Have the console fetch this http:// URL and show the response" onclick="runIf('m-http', u => 'http ' + u)">Fetch</button></div>
     </div>
 
     <!-- raw + power -->
     <div data-sec="Control" class="pcard wide">
       <h3>Power</h3>
       <div class="row">
-        <button class="danger" onclick="runIf(null, () => 'power rest', 'Put the console into rest mode?')">power rest</button>
-        <button class="danger" onclick="runIf(null, () => 'power reboot', 'Reboot the console?')">power reboot</button>
-        <button class="danger" onclick="runIf(null, () => 'power off', 'Power the console off? It cannot be woken from here.')">power off</button>
+        <button title="Put the console into rest mode; the payload keeps running (asks first)" class="danger" onclick="runIf(null, () => 'power rest', 'Put the console into rest mode?')">power rest</button>
+        <button title="Reboot the console: ends the payload, which must be loaded again (asks first)" class="danger" onclick="runIf(null, () => 'power reboot', 'Reboot the console?')">power reboot</button>
+        <button title="Power the console off; it cannot be woken from here (asks first)" class="danger" onclick="runIf(null, () => 'power off', 'Power the console off? It cannot be woken from here.')">power off</button>
       </div>
     </div>
 
@@ -614,7 +659,7 @@
     <!-- hardware (GET /api/hwdetail) -->
     <div data-sec="Hardware" class="pcard">
       <h3>Power history <small>ICC counters</small>
-        <button class="mini" id="hw-refresh" title="Read the hardware section again">Refresh</button> <span class="note" id="hw-when"></span></h3>
+        <button class="mini" id="hw-refresh" title="Read the hardware cards again now (they also refresh every 15 s)">Refresh</button> <span class="note" id="hw-when"></span></h3>
       <dl class="kv" id="hw-power"><dt>—</dt><dd></dd></dl>
     </div>
     <div data-sec="Hardware" class="pcard">
@@ -646,7 +691,7 @@
     <!-- display (GET /api/display) -->
     <div data-sec="Display" class="pcard">
       <h3>Sink <small>from the EDID</small>
-        <button class="mini" id="dp-refresh" title="Read the EDID again">Refresh</button></h3>
+        <button class="mini" id="dp-refresh" title="Read the display EDID and monitor info again (after changing TV or input)">Refresh</button></h3>
       <dl class="kv" id="dp-sink"><dt>—</dt><dd></dd></dl>
     </div>
     <div data-sec="Display" class="pcard">
@@ -667,7 +712,7 @@
     </div>
     <div data-sec="Display" class="pcard">
       <h3>Raw <small>EDID and the system's monitor-info record</small></h3>
-      <div class="row" style="margin-top:0"><button class="mini" id="dp-save">Save EDID (.bin)</button>
+      <div class="row" style="margin-top:0"><button title="Save the display&#x27;s EDID to your computer as edid.bin" class="mini" id="dp-save">Save EDID (.bin)</button>
         <span class="note" id="dp-rc"></span></div>
       <details><summary>EDID hex</summary><pre class="hexdump" id="dp-edid-hex"></pre></details>
       <details><summary>Monitor-info record hex (0x144 bytes)</summary><pre class="hexdump" id="dp-mon-hex"></pre></details>
@@ -1373,7 +1418,7 @@ async function loadGallery() {
       const ext = (file.split(".").pop() || "").toUpperCase();
       return `<div class="gitem" title="${esc(it.path)}">` +
         `<span class="gwhen">${esc(when)}</span><span class="gmeta">${esc(title)} · ${esc(ext)} · ${fmtSize(it.size)}</span>` +
-        `<button data-view="${i}">View</button></div>`;
+        `<button data-view="${i}" title="Show this capture here">View</button></div>`;
     }).join("");
     box.querySelectorAll("button[data-view]").forEach(b =>
       b.onclick = () => viewCapture(items[Number(b.dataset.view)].path, b));
@@ -1464,6 +1509,7 @@ function setTrigger(k, value) {
   trigger[k] = value;
   trigInputs[k].value = value;
   document.getElementById(trigInputs[k].id + "-val").textContent = value;
+  trigInputs[k].title = (k ? "R2" : "L2") + " pull " + value + " of 255";
   sendSticks();
 }
 const releaseTriggers = () => trigInputs.forEach((el, k) => setTrigger(k, 0));
