@@ -114,6 +114,7 @@ disable that first.
 | `uninstall TITLE_ID` | uninstall a title |
 | `notify TYPE MESSAGE` | an on-screen message: `toast` (banner) or `flyout` (card) |
 | `hwinfo` | model, serial, CPU temp, all 64 SoC sensors (incl. the hottest), CPU clock, fan speed %, SoC power (mW, total and per rail), system version string, SoC id, CPU mode, core count, uptime |
+| `thermal-probe` | bring-up: the raw readings libkernel's other thermal paths give (the ICC's `/dev/icc_thermal` byte, the `machdep.aeolia.alert.thermal` sysctl, the SMU's read-only getters), uninterpreted |
 | `df` | free space per mounted volume |
 | `led BWA` / `off` / `auto` / `breathe B W A [MS]` / `chase [MS]` | the console indicator LED (static, off, system-controlled, or an animated effect), via `/dev/icc_indicator` |
 | `fan [TEMP]` | read the fan duty, or set the manual threshold (30..90 °C), via `/dev/icc_fan` |
@@ -195,7 +196,8 @@ The top of the page is the live hardware view: the model, the CPU temperature
 and **every SoC sensor** (gauges, a grid of all readings, and a rolling chart of
 the CPU and **all 64 SoC sensors**), the CPU clock, and a **fan-speed gauge and
 rolling chart** (from `sceKernelGetCurrentFanDuty`, not the manual-duty ioctl,
-which reads 0 in auto mode).
+which reads 0 in auto mode). The charts share one time range, from 5 s to 1 h;
+on the 5 s and 30 s ranges the page samples every 0.5 s instead of every 2 s.
 
 Below it is a control panel that drives **every function the payload has**
 — the virtual pad (open/close and each DualSense button), frame and screenshot
@@ -222,6 +224,13 @@ console's address out of the browser:
 
 ```bash
 tools/ps5web.py            # serves http://127.0.0.1:8099, forwards to the console
+```
+
+To try an edit to the page without rebuilding the payload, serve the local file
+instead of the console's copy; the API calls still go to the console:
+
+```bash
+tools/ps5web.py --html tools/ps5web.html
 ```
 
 It uses the same `PS5_HOST`/`.env` as `ps5loop.py`, and never sends the console's

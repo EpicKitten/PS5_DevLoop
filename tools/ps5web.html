@@ -256,7 +256,7 @@
   <div id="charts-area">
   <div class="card timebar">
     <div class="seg" id="ranges">
-      <button data-win="60">1m</button><button data-win="300">5m</button><button data-win="900">15m</button><button data-win="3600">1h</button><button data-win="0">All</button>
+      <button data-win="5">5s</button><button data-win="30">30s</button><button data-win="60">1m</button><button data-win="300">5m</button><button data-win="900">15m</button><button data-win="3600">1h</button><button data-win="0">All</button>
     </div>
     <div class="seg">
       <button id="zoom-out" title="Zoom out">−</button><button id="zoom-in" title="Zoom in">+</button>
@@ -580,7 +580,11 @@ else if (typeof exports === 'object')
   exports["jpegxr"] = jpegxr;
 </script>
 <script>
-const MAX = 1800;                // an hour of 2 s samples (room to zoom into)
+// Samples arrive every 2 s, or every 0.5 s while a short range (5s, 30s) is live.
+// History keeps the last hour, whichever rate filled it.
+const POLL_MS = 2000, FAST_POLL_MS = 500, FAST_WIN = 30;
+const KEEP_S = 3600;             // seconds of history kept (room to zoom into)
+const MAX = KEEP_S * 1000 / FAST_POLL_MS;
 // Columnar history for uPlot: parallel arrays, each the same length as T.
 const T = [];                    // sample timestamps, unix seconds (the x axis)
 const CPU = [];                  // CPU temp per sample
@@ -678,7 +682,7 @@ let follow = true;
 let win = 300;                   // seconds shown while following; 0 = all history
 let view = null;                 // [min, max] every chart is on (uPlot applies scales
                                  // a tick later, so this is the truth, not u.scales)
-const MIN_SPAN = 6;              // never zoom in past three samples
+const MIN_SPAN = 2;              // never zoom in past a few fast samples
 const axisColor = "#6b7a92", gridStroke = { stroke: "#1e2a40", width: 1 };
 const socHue = k => `hsla(${(k / Math.max(1, socIds.length)) * 300}, 70%, 60%, 0.55)`;
 const fmtClock = ts => {
@@ -1048,7 +1052,7 @@ async function poll() {
       PWI[k].push(pw && pw.mA ? pw.mA[k] / 1000 : null);
     }
     socIds.forEach((id, k) => SOC[k].push(id in byId ? byId[id] : null));
-    while (T.length > MAX) { T.shift(); CPU.shift(); FAN.shift(); MHZ.shift();
+    while (T.length > MAX || (T.length > 1 && T[T.length - 1] - T[0] > KEEP_S)) { T.shift(); CPU.shift(); FAN.shift(); MHZ.shift();
       PWT.shift(); PWA.shift(); PWB.shift(); PWV.forEach(a => a.shift()); PWI.forEach(a => a.shift()); SOC.forEach(a => a.shift()); }
     pushCharts();
     status(true, "connected · " + new Date().toLocaleTimeString());
@@ -1494,8 +1498,14 @@ function getFile() {
 document.getElementById("clear").onclick = () => { out.textContent = ""; out.dataset.virgin = "1"; };
 
 window.addEventListener("resize", resizeCharts);
-poll();
-setInterval(poll, 2000);
+// One request at a time: the next poll is scheduled when this one ends, sooner
+// while a short range is live so a 5 s view still has points to draw.
+async function pollLoop() {
+  await poll();
+  const fast = follow && win > 0 && win <= FAST_WIN;
+  setTimeout(pollLoop, fast ? FAST_POLL_MS : POLL_MS);
+}
+pollLoop();
 </script>
 </body>
 </html>

@@ -54,6 +54,8 @@
  *   notify TYPE MESSAGE       show a message: TYPE is toast or flyout
  *   hwinfo                    model, serial, cpu + all SoC temps, cpu clock, fan %,
  *                             SoC power
+ *   thermal-probe             bring-up: the raw ICC thermal byte, the thermal
+ *                             alert sysctl and the SMU's read-only getters
  *   df                        free space per mounted volume
  *   led BWA|off|auto|breathe B W A [MS]|chase [MS]   the console indicator LED
  *   lightbar R G B            attempt the physical pad lightbar (shell owns it)
@@ -2161,6 +2163,93 @@ static char *hwinfo_json(void)
     return text_append(json, &cap, &used, "]}");
 }
 
+// thermal-probe: the temperature-looking sources libkernel reaches that hwinfo
+// does not report, read raw so their meaning can be worked out. Every request
+// here is one a libkernel getter makes (found by cross-referencing its /dev
+// strings on 12.20) and is direction OUT only: the driver fills a buffer and
+// nothing is written to the hardware. Nothing is interpreted; a failed read
+// prints its errno.
+#define MP1_DEV "/dev/mp1"
+#define MP1_METRICS 0x406cae01ul // 108 bytes OUT
+#define ICC_THERMAL_DEV "/dev/icc_thermal"
+#define ICC_THERMAL_GET 0x40019003ul // 1 byte OUT
+
+static void thermal_probe(int client)
+{
+    ensure_elevated();
+    char line[PS5LOOP_LINE];
+    size_t used = 0;
+#define PROBE_ADD(...)                                                                             \
+    do                                                                                             \
+    {                                                                                              \
+        const int n = snprintf(line + used, sizeof(line) - used, __VA_ARGS__);                    \
+        if (n > 0)                                                                                 \
+            used = used + (size_t)n < sizeof(line) ? used + (size_t)n : sizeof(line) - 1;          \
+    } while (0)
+
+    // The ICC (the fan's microcontroller): one byte
+    int fd = open(ICC_THERMAL_DEV, O_RDONLY);
+    if (fd < 0)
+        PROBE_ADD("icc=err:%d", errno);
+    else
+    {
+        unsigned char b = 0;
+        if (ioctl(fd, ICC_THERMAL_GET, &b) == 0)
+            PROBE_ADD("icc=%u", b);
+        else
+            PROBE_ADD("icc=err:%d", errno);
+        close(fd);
+    }
+
+    // The southbridge's thermal-alert sysctl
+    {
+        int v = 0;
+        size_t length = sizeof(v);
+        if (sysctlbyname("machdep.aeolia.alert.thermal", &v, &length, NULL, 0) == 0)
+            PROBE_ADD(" aeolia=%d/len%zu", v, length);
+        else
+            PROBE_ADD(" aeolia=err:%d", errno);
+    }
+
+    // The SMU (mp1): the power blob's tail, then four 4-byte getters and a
+    // 108-byte table
+    {
+        uint32_t words[HWINFO_POWER_WORDS] = {0};
+        if (sceKernelGetSocPowerConsumption(words) == 0)
+            PROBE_ADD(" pw24=%u pw25=%u pw26=%u pw27=%u", words[24], words[25], words[26], words[27]);
+        else
+            PROBE_ADD(" pw=err");
+    }
+    fd = open(MP1_DEV, O_RDWR);
+    if (fd < 0)
+        PROBE_ADD(" mp1=err:%d", errno);
+    else
+    {
+        static const unsigned long getters[] = {0x4004ae22ul, 0x4004ae23ul, 0x4004ae24ul,
+                                                0x4004ae25ul};
+        for (size_t i = 0; i < sizeof(getters) / sizeof(getters[0]); i++)
+        {
+            uint32_t v = 0;
+            if (ioctl(fd, getters[i], &v) == 0)
+                PROBE_ADD(" ae%02lx=%u", (getters[i] & 0xff), v);
+            else
+                PROBE_ADD(" ae%02lx=err:%d", (getters[i] & 0xff), errno);
+        }
+        uint32_t table[27] = {0};
+        if (ioctl(fd, MP1_METRICS, table) == 0)
+        {
+            PROBE_ADD(" ae01=");
+            for (int i = 0; i < 27; i++)
+                PROBE_ADD("%s%u", i ? "," : "", table[i]);
+        }
+        else
+            PROBE_ADD(" ae01=err:%d", errno);
+        close(fd);
+    }
+#undef PROBE_ADD
+    reply(client, "ok thermal-probe %s", line);
+}
+
 // ===== Console hardware: indicator LED, fan and beeper (ICC) =====
 // The indicator LED goes through /dev/icc_indicator's dynamic-LED ioctls -- a
 // direct device path, so it needs no scePad handle (which SceShellUI owns, the
@@ -3367,6 +3456,11 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     if (strcmp(command, "hwinfo") == 0)
     {
         hwinfo(client);
+        return 0;
+    }
+    if (strcmp(command, "thermal-probe") == 0)
+    {
+        thermal_probe(client);
         return 0;
     }
     if (strcmp(command, "setting-set") == 0)
