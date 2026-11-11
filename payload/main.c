@@ -1967,6 +1967,25 @@ int sceKernelGetCurrentFanDuty(uint16_t *, void *);
 // voltage and a temperature) is not reported here. Which rail feeds the CPU and
 // which the GPU is not established, so they are reported as rails A and B.
 int sceKernelGetSocPowerConsumption(void *);
+// Identity and state, as orezraey's 13.60 probes measured them. On 12.20 the SoC
+// id, CPU mode and version calls answer the same way (probed); the cpumask call
+// is not exported there, so cpuMask stays 0 and only hw.ncpu is known:
+//   sceKernelGetMainSocId()        the SoC's id word (0x00840f80 on a CFI-2014)
+//   sceKernelGetCpumode()          the CPU mode, a small integer
+//   sceKernelGetAvailableCpumask() one bit per core this process may run on
+//   sceKernelGetProsperoSystemSwVersion(v)  0x28 bytes: a size, the version as a
+//                                  string ("13.600.007") and as the firmware word
+int sceKernelGetMainSocId(void);
+int sceKernelGetCpumode(void);
+// (the cpumask call has no SDK stub and is missing on 12.20: it is looked up in
+// libkernel at run time and skipped when absent)
+typedef struct sw_version
+{
+    uint64_t size;
+    char text[0x1c];
+    uint32_t version;
+} sw_version_t;
+int sceKernelGetProsperoSystemSwVersion(sw_version_t *);
 #define HWINFO_POWER_WORDS 28
 
 // The SoC exposes many thermal sensors, not one: sceKernelGetSocSensorTemperature
@@ -1987,6 +2006,13 @@ typedef struct hwinfo
     int socMaxId;
     int socN;    // how many sensors answered plausibly
     int fanPct;  // current fan duty 0..100, or -1 if the call is unavailable
+    uint32_t socId;
+    int cpuMode;
+    int ncpu;         // hw.ncpu: the cores the SoC has
+    uint64_t cpuMask; // the cores available to this process
+    long bootTime;    // kern.boottime, unix seconds; 0 if unavailable
+    long uptime;      // seconds since boot (the monotonic clock)
+    char sw[0x20];    // the system software version as the system prints it
     bool powerOk; // the SoC power call answered
     uint32_t railmW[2], railmV[2], railmA[2];
     int socIds[HWINFO_SOC_SENSORS];
@@ -2035,6 +2061,39 @@ static void hwinfo_read(hwinfo_t *h)
             h->fanPct = p;
         }
     }
+    h->socId = (uint32_t)sceKernelGetMainSocId();
+    h->cpuMode = sceKernelGetCpumode();
+    {
+        static uint64_t (*cpumask)(void);
+        if (cpumask == NULL)
+        {
+            void *const kernel = dlopen("libkernel_sys.sprx", RTLD_NOW | RTLD_GLOBAL);
+            if (kernel != NULL)
+                cpumask = (uint64_t (*)(void))dlsym(kernel, "sceKernelGetAvailableCpumask");
+        }
+        if (cpumask != NULL)
+            h->cpuMask = cpumask();
+    }
+    {
+        size_t length = sizeof(h->ncpu);
+        if (sysctlbyname("hw.ncpu", &h->ncpu, &length, NULL, 0) != 0)
+            h->ncpu = 0;
+        struct timeval boot = {0};
+        length = sizeof(boot);
+        if (sysctlbyname("kern.boottime", &boot, &length, NULL, 0) == 0)
+            h->bootTime = (long)boot.tv_sec;
+        struct timespec now = {0};
+        if (clock_gettime(CLOCK_MONOTONIC, &now) == 0)
+            h->uptime = (long)now.tv_sec;
+        sw_version_t version;
+        memset(&version, 0, sizeof(version));
+        version.size = sizeof(version);
+        if (sceKernelGetProsperoSystemSwVersion(&version) == 0)
+        {
+            version.text[sizeof(version.text) - 1] = '\0';
+            snprintf(h->sw, sizeof(h->sw), "%s", version.text);
+        }
+    }
     {
         uint32_t words[HWINFO_POWER_WORDS + 4] = {0}; // a little slack past the 0x70 bytes
         if (sceKernelGetSocPowerConsumption(words) == 0)
@@ -2056,10 +2115,12 @@ static void hwinfo(int client)
     hwinfo_read(&h);
     reply(client,
           "ok fw=0x%08x model=%s serial=%s cpuC=%d socC=%d socMax=%d socMaxId=%d socN=%d cpuMHz=%ld "
-          "fanPct=%d socmW=%d railAmW=%d railBmW=%d",
+          "fanPct=%d socmW=%d railAmW=%d railBmW=%d sw=%s socId=0x%08x cpuMode=%d ncpu=%d "
+          "cpuMask=0x%llx uptime=%ld",
           h.fw, h.model, h.serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz, h.fanPct,
           h.powerOk ? (int)(h.railmW[0] + h.railmW[1]) : -1, h.powerOk ? (int)h.railmW[0] : -1,
-          h.powerOk ? (int)h.railmW[1] : -1);
+          h.powerOk ? (int)h.railmW[1] : -1, h.sw[0] != '\0' ? h.sw : "?", h.socId, h.cpuMode,
+          h.ncpu, (unsigned long long)h.cpuMask, h.uptime);
 }
 
 // The same reading as a JSON object, for the dashboard the console hosts. The
@@ -2068,7 +2129,8 @@ static char *hwinfo_json(void)
 {
     hwinfo_t h;
     hwinfo_read(&h);
-    char model[520], serial[520];
+    char model[520], serial[520], sw[80];
+    json_escape(sw, sizeof(sw), h.sw);
     json_escape(model, sizeof(model), h.model);
     json_escape(serial, sizeof(serial), h.serial);
     size_t cap = 1u << 12, used = 0;
@@ -2079,6 +2141,11 @@ static char *hwinfo_json(void)
                        "\"cpuMHz\":%ld,\"fanPct\":%d,",
                        h.fw, model, serial, h.cpuC, h.soc0, h.socMax, h.socMaxId, h.socN, h.cpuMHz,
                        h.fanPct);
+    json = text_append(json, &cap, &used,
+                       "\"sw\":\"%s\",\"socId\":\"0x%08x\",\"cpuMode\":%d,\"ncpu\":%d,"
+                       "\"cores\":%d,\"cpuMask\":\"0x%llx\",\"bootTime\":%ld,\"uptime\":%ld,",
+                       sw, h.socId, h.cpuMode, h.ncpu, __builtin_popcountll(h.cpuMask),
+                       (unsigned long long)h.cpuMask, h.bootTime, h.uptime);
     // "power": per-rail readings, or null when the call is unavailable
     if (h.powerOk)
         json = text_append(json, &cap, &used,

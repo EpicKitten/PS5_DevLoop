@@ -49,7 +49,8 @@ Commands:
   rest / reboot / power-off   put the console in rest mode, reboot, or power off
   uninstall TITLE_ID    uninstall a title (registered titles; irreversible)
   notify TYPE MESSAGE   show a message: TYPE is toast (banner) or flyout (card)
-  hwinfo                model, serial, temperatures, cpu clock, fan and SoC power
+  hwinfo                model, serial, version, SoC id, temperatures, cpu clock and
+                        mode, cores, uptime, fan and SoC power
   df                    free space per mounted volume
   led ...               indicator LED: BLUE WHITE AMBER | off | auto | breathe B W A [MS] | chase [MS]
   lightbar R G B        attempt the physical DualSense lightbar (SceShellUI owns the pad)

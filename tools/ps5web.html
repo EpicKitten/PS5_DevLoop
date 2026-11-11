@@ -139,6 +139,23 @@
   .cluster .c-right { grid-area: 2 / 3; } .cluster .c-down { grid-area: 3 / 2; }
   .cluster .c-tri { grid-area: 1 / 2; } .cluster .c-sq { grid-area: 2 / 1; }
   .cluster .c-ci { grid-area: 2 / 3; } .cluster .c-cr { grid-area: 3 / 2; }
+  /* virtual sticks: drag the knob; letting go centres it */
+  .sticks { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; justify-items: center; margin: 12px 0 4px; }
+  .stick-col { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .stick-col .hint { margin: 0; } .stick-col b { color: var(--text); font-variant-numeric: tabular-nums; font-weight: 600; }
+  .stick { width: 112px; height: 112px; border-radius: 50%; position: relative; touch-action: none; cursor: grab;
+    background: radial-gradient(circle at 50% 50%, #101a2b 0 58%, #0b1220 60%); border: 1px solid var(--line); }
+  .stick::before, .stick::after { content: ""; position: absolute; background: #1e2a40; }
+  .stick::before { left: 50%; top: 10%; bottom: 10%; width: 1px; }
+  .stick::after { top: 50%; left: 10%; right: 10%; height: 1px; }
+  .stick .knob { position: absolute; z-index: 1; left: 50%; top: 50%; width: 44px; height: 44px; margin: -22px 0 0 -22px;
+    border-radius: 50%; background: #2a4063; border: 1px solid var(--accent); box-shadow: 0 2px 10px #0008; pointer-events: none; }
+  .stick.held { cursor: grabbing; border-color: var(--accent); } .stick.held .knob { background: var(--accent); }
+  /* analogue triggers: drag for a partial pull; they spring back unless latched */
+  .triggers { display: grid; grid-template-columns: auto 1fr 34px; gap: 6px 10px; align-items: center; margin: 10px 4px 4px; }
+  .triggers label { color: var(--muted); font-size: 12px; }
+  .triggers input[type=range] { flex: none; width: 100%; padding: 0; border: 0; background: none; accent-color: var(--accent); }
+  .triggers b { font-size: 12px; font-variant-numeric: tabular-nums; text-align: right; }
   .pad-sys { display: flex; flex-wrap: wrap; gap: 6px; justify-content: center; margin-top: 6px; }
   .pad-sys button { padding: 6px 9px; font-size: 12px; }
   /* output */
@@ -184,6 +201,10 @@
   <div class="meta">
     <span>Model <b id="model">—</b></span>
     <span>Firmware <b id="fw">—</b></span>
+    <span>SoC <b id="socid">—</b></span>
+    <span>CPU mode <b id="cpumode">—</b></span>
+    <span>Cores <b id="cores">—</b></span>
+    <span>Uptime <b id="uptime">—</b></span>
     <span>Serial <b id="serial">—</b>
       <button id="serial-toggle" class="mini" aria-pressed="false" title="Show or hide the serial number">Show</button></span>
   </div>
@@ -338,6 +359,20 @@
           <button class="c-ci" onclick="tap('circle')">○</button>
           <button class="c-cr" onclick="tap('cross')">✕</button>
         </div>
+      </div>
+      <div class="sticks">
+        <div class="stick-col"><div class="stick" id="stick-l" data-side="l"><i class="knob"></i></div>
+          <span class="hint">L stick <b id="stick-l-val">128, 128</b></span></div>
+        <div class="stick-col"><div class="stick" id="stick-r" data-side="r"><i class="knob"></i></div>
+          <span class="hint">R stick <b id="stick-r-val">128, 128</b></span></div>
+      </div>
+      <div class="triggers">
+        <label for="trig-l2">L2</label><input type="range" id="trig-l2" data-trig="0" min="0" max="255" value="0"><b id="trig-l2-val">0</b>
+        <label for="trig-r2">R2</label><input type="range" id="trig-r2" data-trig="1" min="0" max="255" value="0"><b id="trig-r2-val">0</b>
+      </div>
+      <div class="row checks" style="justify-content:center">
+        <label><input type="checkbox" id="trig-latch">keep triggers where I leave them</label>
+        <button class="mini" id="trig-release">Release</button>
       </div>
       <div class="pad-sys">
         <button onclick="tap('l1')">L1</button>
@@ -586,6 +621,12 @@ function showSerial() {
   b.setAttribute("aria-pressed", String(serialShown));
 }
 document.getElementById("serial-toggle").onclick = () => { serialShown = !serialShown; showSerial(); };
+
+// Seconds as "3d 4h 12m" / "4h 12m" / "12m 5s".
+function fmtUptime(s) {
+  const d = Math.floor(s / 86400), h = Math.floor(s % 86400 / 3600), m = Math.floor(s % 3600 / 60);
+  return d ? `${d}d ${h}h ${m}m` : h ? `${h}h ${m}m` : `${m}m ${Math.floor(s % 60)}s`;
+}
 
 function setGauge(id, temp) {
   const g = document.getElementById(id);
@@ -956,7 +997,21 @@ async function poll() {
     document.getElementById("model").textContent = d.model || "—";
     const fw = document.getElementById("fw");
     fw.textContent = fwName(d.fw);
-    fw.title = d.fw || "";               // the raw word, on hover
+    // the raw word and the system's own version string, on hover
+    fw.title = [d.fw, d.sw].filter(Boolean).join(" · ");
+    // these four come from a newer payload; an older one leaves them as dashes
+    const meta = (id, text, title) => {
+      const el = document.getElementById(id);
+      el.textContent = text == null || text === "" ? "—" : text;
+      el.title = title || "";
+    };
+    meta("socid", d.socId);
+    meta("cpumode", d.cpuMode);
+    // "13 of 16" where the console says which cores a process may use, else the count
+    meta("cores", d.cores ? d.cores + (d.ncpu ? " of " + d.ncpu : "") : d.ncpu || null,
+      d.cores ? "available to the payload; mask " + d.cpuMask : "");
+    meta("uptime", d.uptime ? fmtUptime(d.uptime) : null,
+      d.bootTime ? "booted " + new Date(d.bootTime * 1000).toLocaleString() : "");
     serial = d.serial || "";
     showSerial();
     document.getElementById("mhz").textContent = d.cpuMHz == null ? "—" : d.cpuMHz;
@@ -1213,9 +1268,96 @@ function runIf(id, build, confirmMsg) {
   run(build(v));
 }
 
-function tap(name) {
+// ---- virtual sticks ----
+// Dragging a knob holds that stick with "pad set" (0..255 an axis, 128 the centre);
+// letting go centres it. Only one request is in flight at a time and only the
+// newest position is sent next, so a fast drag never queues up stale positions.
+const stick = { l: [128, 128], r: [128, 128] };
+const trigger = [0, 0];                           // L2, R2 pull, 0..255
+let stickSent = "", stickBusy = false, stickButtons = 0;
+const sticksIdle = () => stick.l[0] === 128 && stick.l[1] === 128 && stick.r[0] === 128 && stick.r[1] === 128 &&
+  trigger[0] === 0 && trigger[1] === 0;
+async function sendSticks() {
+  if (stickBusy) return;
+  stickBusy = true;
+  try {
+    for (;;) {
+      // a pulled trigger also sets its button bit, as a real pad does
+      const buttons = stickButtons | (trigger[0] ? BTN.l2 : 0) | (trigger[1] ? BTN.r2 : 0);
+      const want = "pad set " + buttons.toString(16) + " " + [...stick.l, ...stick.r, ...trigger].join(" ");
+      if (want === stickSent) break;
+      const r = await fetch("/api/run?c=" + encodeURIComponent(want), { cache: "no-store" });
+      const reply = (await r.text()).trim();
+      stickSent = want;
+      if (!/^ok\b/.test(reply)) { logLine("  → stick: " + (reply || "no reply") + " (is the pad open?)", "err"); break; }
+    }
+  } catch (e) {
+    logLine("  → stick: request failed: " + e.message, "err");
+  } finally {
+    stickBusy = false;
+  }
+}
+document.querySelectorAll(".stick").forEach(el => {
+  const side = el.dataset.side, knob = el.querySelector(".knob");
+  const label = document.getElementById("stick-" + side + "-val");
+  const place = (dx, dy) => {                       // dx, dy in -1..1
+    const reach = el.clientWidth / 2 - 22;          // the knob stays inside the ring
+    knob.style.transform = `translate(${dx * reach}px, ${dy * reach}px)`;
+    stick[side] = [Math.round(128 + dx * 127), Math.round(128 + dy * 127)];
+    label.textContent = stick[side].join(", ");
+    sendSticks();
+  };
+  const move = e => {
+    const box = el.getBoundingClientRect(), reach = box.width / 2 - 22;
+    let dx = (e.clientX - box.left - box.width / 2) / reach, dy = (e.clientY - box.top - box.height / 2) / reach;
+    const len = Math.hypot(dx, dy);
+    if (len > 1) { dx /= len; dy /= len; }          // clamp to the circle
+    place(dx, dy);
+  };
+  const drop = () => { el.classList.remove("held"); place(0, 0); };
+  el.addEventListener("pointerdown", e => {
+    el.setPointerCapture(e.pointerId);
+    el.classList.add("held");
+    move(e);
+  });
+  el.addEventListener("pointermove", e => { if (el.classList.contains("held")) move(e); });
+  el.addEventListener("pointerup", drop);
+  el.addEventListener("pointercancel", drop);
+  el.addEventListener("lostpointercapture", () => { if (el.classList.contains("held")) drop(); });
+});
+
+// Triggers: a slider each. Dragging holds that much pull; letting go releases it,
+// unless "keep" is ticked, which leaves it pulled until Release (or unticking).
+const trigInputs = [...document.querySelectorAll("input[data-trig]")];
+function setTrigger(k, value) {
+  trigger[k] = value;
+  trigInputs[k].value = value;
+  document.getElementById(trigInputs[k].id + "-val").textContent = value;
+  sendSticks();
+}
+const releaseTriggers = () => trigInputs.forEach((el, k) => setTrigger(k, 0));
+trigInputs.forEach((el, k) => {
+  el.addEventListener("input", () => setTrigger(k, Number(el.value)));
+  const letGo = () => { if (!document.getElementById("trig-latch").checked) setTrigger(k, 0); };
+  el.addEventListener("pointerup", letGo);
+  el.addEventListener("pointercancel", letGo);
+  el.addEventListener("keyup", letGo);
+  el.addEventListener("blur", letGo);
+});
+document.getElementById("trig-release").onclick = releaseTriggers;
+document.getElementById("trig-latch").onchange = e => { if (!e.target.checked) releaseTriggers(); };
+
+// A button press. "pad tap" centres the sticks and releases the triggers, so while
+// one is held the press is sent with those positions, then the same without it.
+async function tap(name) {
   const ms = parseInt(val("pad-ms"), 10) || 100;
-  run("pad tap " + BTN[name].toString(16) + " " + ms);
+  if (sticksIdle()) { run("pad tap " + BTN[name].toString(16) + " " + ms); return; }
+  logLine("» press " + name + " (with a stick or trigger held)", "cmd");
+  stickButtons |= BTN[name];
+  sendSticks();
+  await new Promise(done => setTimeout(done, ms));
+  stickButtons &= ~BTN[name];
+  sendSticks();
 }
 
 // ---- typing into the console's on-screen keyboard ----
