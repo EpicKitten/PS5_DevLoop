@@ -83,6 +83,7 @@ tools. The pad can launch anything from the home screen without them.
 | `delete-capture PATH` | remove a leftover capture through the gallery |
 | `doctor` | check the host, payload, loader and capture tools |
 | `close` | remove the pad |
+| `pads` / `--pad N` | up to four virtual pads: `--pad 2` (to 4) on `open`, `close`, `status`, `press`, `hold`, `release` and `seq` drives another one, `pads` lists them, `close --all` removes them all. Pads 2-4 go to the next signed-in user without a pad and never disconnect a real controller; on the wire it is `pad N ACTION`, and plain `pad ACTION` stays pad 1 |
 
 `tools/ps5loop.py --help` lists the rest; `payload/main.c` documents the wire
 protocol (one text command per connection, port 9112).

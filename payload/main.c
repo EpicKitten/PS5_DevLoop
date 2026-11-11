@@ -16,6 +16,10 @@
  *                             that the virtual pad is the one titles read
  *   pad close                 remove it
  *   pad status                handle, device id, user, last insert result
+ *   pad N ...                 any pad command for virtual pad N (1-4; default 1):
+ *                             "pad 2 open" adds a second pad, for the next signed-in
+ *                             user without one (pads 2-4 never disconnect controllers)
+ *   pad list / pad close all  every pad's state / close them all
  *   pad set B LX LY RX RY L2 R2   hold this state (B is a hex button mask)
  *   pad tap B MS              press B for MS milliseconds, then release
  *   pad handle N              bring-up: use N as the insert handle
@@ -268,11 +272,11 @@ static int32_t (*screenshot_capture)(int32_t type, char *path, int (*cancel)(voi
 static int32_t (*content_delete_by_path)(const char *path);
 static bool g_capture_libraries;
 
-/* The virtual pad. */
-static struct
+/* The virtual pads: up to four, each its own device. Pad 1 (slot 0) is the one
+   every command addresses unless another is named ("pad 2 tap ..."). */
+#define PS5LOOP_PADS 4
+typedef struct pad_slot
 {
-    pthread_mutex_t lock;
-    bool libraries; /* libSceMbus loaded and the pad service initialised */
     bool open;
     int32_t handle;
     uint64_t device_id;
@@ -280,7 +284,23 @@ static struct
     int32_t last_insert;
     uint32_t inserts;
     pad_data_t state;
-} g_pad = {.lock = PTHREAD_MUTEX_INITIALIZER, .handle = -1, .user_id = -1};
+} pad_slot_t;
+static struct
+{
+    pthread_mutex_t lock;
+    bool libraries; /* libSceMbus loaded and the pad service initialised */
+    pad_slot_t slot[PS5LOOP_PADS];
+} g_pad = {.lock = PTHREAD_MUTEX_INITIALIZER,
+           .slot = {[0 ... PS5LOOP_PADS - 1] = {.handle = -1, .user_id = -1}}};
+
+// How many pads are open.
+static int pads_open(void)
+{
+    int count = 0;
+    for (int n = 0; n < PS5LOOP_PADS; n++)
+        count += g_pad.slot[n].open;
+    return count;
+}
 
 // Log one line to stdout (klog carries a payload's output) and to the log file
 // the FTP server can hand back.
@@ -417,10 +437,14 @@ static void *insert_thread(void *argument)
     for (;;)
     {
         pthread_mutex_lock(&g_pad.lock);
-        if (g_pad.open)
+        for (int n = 0; n < PS5LOOP_PADS; n++)
         {
-            g_pad.last_insert = pad_insert(g_pad.handle, &g_pad.state);
-            g_pad.inserts++;
+            pad_slot_t *const pad = &g_pad.slot[n];
+            if (pad->open)
+            {
+                pad->last_insert = pad_insert(pad->handle, &pad->state);
+                pad->inserts++;
+            }
         }
         pthread_mutex_unlock(&g_pad.lock);
         usleep(PS5LOOP_INSERT_INTERVAL_US);
@@ -466,20 +490,21 @@ static void *discover_thread(void *argument)
     return NULL;
 }
 
-// Hold a state until the next one.
-static void pad_hold(uint32_t buttons, int lx, int ly, int rx, int ry, int l2, int r2)
+// Hold a state on pad n until the next one.
+static void pad_hold(int n, uint32_t buttons, int lx, int ly, int rx, int ry, int l2, int r2)
 {
     pthread_mutex_lock(&g_pad.lock);
-    pad_neutral(&g_pad.state);
-    g_pad.state.buttons = buttons;
-    g_pad.state.lx = (uint8_t)lx;
-    g_pad.state.ly = (uint8_t)ly;
-    g_pad.state.rx = (uint8_t)rx;
-    g_pad.state.ry = (uint8_t)ry;
+    pad_data_t *const state = &g_pad.slot[n].state;
+    pad_neutral(state);
+    state->buttons = buttons;
+    state->lx = (uint8_t)lx;
+    state->ly = (uint8_t)ly;
+    state->rx = (uint8_t)rx;
+    state->ry = (uint8_t)ry;
     // The console reads the triggers from their analog bytes: the bit alone
     // does not register.
-    g_pad.state.l2 = (uint8_t)((buttons & PS5LOOP_BUTTON_L2) != 0 && l2 == 0 ? 255 : l2);
-    g_pad.state.r2 = (uint8_t)((buttons & PS5LOOP_BUTTON_R2) != 0 && r2 == 0 ? 255 : r2);
+    state->l2 = (uint8_t)((buttons & PS5LOOP_BUTTON_L2) != 0 && l2 == 0 ? 255 : l2);
+    state->r2 = (uint8_t)((buttons & PS5LOOP_BUTTON_R2) != 0 && r2 == 0 ? 255 : r2);
     pthread_mutex_unlock(&g_pad.lock);
 }
 
@@ -624,7 +649,11 @@ static int klog_evict_cim(uint64_t keep_device, char *report, size_t size)
         {
             const char *const hex = strstr(row, "0x");
             const uint64_t device = hex != NULL ? strtoull(hex + 2, NULL, 16) : 0;
-            if (device != 0 && device != keep_device && device != 0xffffffffffffffffull)
+            // never one of ours: the pad being opened, or another open virtual pad
+            bool ours = device == keep_device;
+            for (int n = 0; n < PS5LOOP_PADS && !ours; n++)
+                ours = g_pad.slot[n].open && g_pad.slot[n].device_id == device;
+            if (device != 0 && !ours && device != 0xffffffffffffffffull)
             {
                 listed++;
                 const int32_t result = mbus_disconnect != NULL ? mbus_disconnect(device) : -1;
@@ -702,20 +731,60 @@ static int32_t pad_find_handle(int32_t added, const add_device_param_t *param, u
     return -1;
 }
 
-// Create the virtual pad and give it to a user. Returns 0 when samples reach
-// it; the report says what every step returned either way.
-static int pad_open(int32_t user_id, bool evict, char *report, size_t size)
+// A signed-in user for another pad: the first one in the login list that no open
+// pad already belongs to. -1 when every signed-in user has a pad.
+typedef struct login_user_list
 {
-    if (g_pad.open)
+    int32_t user_id[4];
+} login_user_list_t;
+extern int sceUserServiceGetLoginUserIdList(login_user_list_t *list);
+
+static int32_t pad_free_user(void)
+{
+    login_user_list_t list;
+    memset(&list, 0xff, sizeof(list));
+    if (sceUserServiceGetLoginUserIdList(&list) != 0)
+        return -1;
+    for (int i = 0; i < 4; i++)
+    {
+        const int32_t user = list.user_id[i];
+        if (user <= PS5LOOP_UNASSIGNED_USER)
+            continue;
+        bool taken = false;
+        for (int n = 0; n < PS5LOOP_PADS && !taken; n++)
+            taken = g_pad.slot[n].open && g_pad.slot[n].user_id == user;
+        if (!taken)
+            return user;
+    }
+    return -1;
+}
+
+// Create virtual pad n and give it to a user. Returns 0 when samples reach it;
+// the report says what every step returned either way. Pad 1 defaults to the
+// foreground user; pads 2-4 to the next signed-in user without a pad (none: the
+// console asks "Who's using this controller?").
+static int pad_open(int n, int32_t user_id, bool evict, char *report, size_t size)
+{
+    pad_slot_t *const pad = &g_pad.slot[n];
+    if (pad->open)
     {
         note(report, size, "already open");
         return 0;
     }
     if (pad_libraries(report, size) != 0)
         return -1;
-    if (user_id <= PS5LOOP_UNASSIGNED_USER && sceUserServiceGetForegroundUser(&user_id) != 0)
-        user_id = -1;
-    note(report, size, "user=0x%08x", (uint32_t)user_id);
+    if (user_id <= PS5LOOP_UNASSIGNED_USER)
+    {
+        if (n > 0)
+        {
+            user_id = pad_free_user();
+            if (user_id < 0)
+                note(report, size, "no-free-user");
+        }
+        else if (sceUserServiceGetForegroundUser(&user_id) != 0)
+            user_id = -1;
+    }
+    note(report, size, "pad=%d user=0x%08x", n + 1, (uint32_t)user_id);
 
     // The log replays what it holds to a new reader: let that pass, so the
     // device line that follows is this device's.
@@ -771,27 +840,29 @@ static int pad_open(int32_t user_id, bool evict, char *report, size_t size)
     const int32_t handle = pad_find_handle(added, &param, device_id, report, size);
     if (handle < 0)
     {
-        g_pad.device_id = device_id;
+        pad->device_id = device_id;
         return -1;
     }
     pthread_mutex_lock(&g_pad.lock);
-    pad_neutral(&g_pad.state);
-    g_pad.handle = handle;
-    g_pad.device_id = device_id;
-    g_pad.user_id = user_id;
-    g_pad.inserts = 0;
-    g_pad.open = true;
+    pad_neutral(&pad->state);
+    pad->handle = handle;
+    pad->device_id = device_id;
+    pad->user_id = user_id;
+    pad->inserts = 0;
+    pad->last_insert = 0;
+    pad->open = true;
     pthread_mutex_unlock(&g_pad.lock);
     return 0;
 }
 
-static void pad_close(char *report, size_t size)
+static void pad_close(int n, char *report, size_t size)
 {
+    pad_slot_t *const pad = &g_pad.slot[n];
     pthread_mutex_lock(&g_pad.lock);
-    const bool was_open = g_pad.open;
-    const int32_t handle = g_pad.handle;
-    g_pad.open = false;
-    g_pad.handle = -1;
+    const bool was_open = pad->open;
+    const int32_t handle = pad->handle;
+    pad->open = false;
+    pad->handle = -1;
     pthread_mutex_unlock(&g_pad.lock);
     if (!was_open)
     {
@@ -804,12 +875,32 @@ static void pad_close(char *report, size_t size)
     note(report, size, "delete=0x%08x", (uint32_t)scePadVirtualDeviceDeleteDevice(handle));
 }
 
-// Press and release, timed here and not across the network.
-static void pad_tap(uint32_t buttons, int hold_ms)
+// Close every open pad (quit).
+static void pad_close_all(char *report, size_t size)
 {
-    pad_hold(buttons, 128, 128, 128, 128, 0, 0);
+    for (int n = 0; n < PS5LOOP_PADS; n++)
+        if (g_pad.slot[n].open)
+        {
+            note(report, size, "pad%d:", n + 1);
+            pad_close(n, report, size);
+        }
+}
+
+// The first open pad, or -1: what the screenshot shortcut presses Create on.
+static int pad_first_open(void)
+{
+    for (int n = 0; n < PS5LOOP_PADS; n++)
+        if (g_pad.slot[n].open)
+            return n;
+    return -1;
+}
+
+// Press and release on pad n, timed here and not across the network.
+static void pad_tap(int n, uint32_t buttons, int hold_ms)
+{
+    pad_hold(n, buttons, 128, 128, 128, 128, 0, 0);
     usleep((useconds_t)hold_ms * 1000u);
-    pad_hold(0, 128, 128, 128, 128, 0, 0);
+    pad_hold(n, 0, 128, 128, 128, 128, 0, 0);
     usleep(50000);
 }
 
@@ -1080,7 +1171,8 @@ static bool direct_shot(int client, int type, int wait_ms, char *report, size_t 
 static void take_shot(int client, int hold_ms)
 {
     char report[PS5LOOP_LINE - 128] = {0};
-    if (!g_pad.open)
+    const int shooter = pad_first_open(); // Create works from any controller
+    if (shooter < 0)
     {
         reply(client,
               "err screenshot needs the pad: pad open first (latest-capture sends the newest one)");
@@ -1089,7 +1181,7 @@ static void take_shot(int client, int hold_ms)
     capture_libraries(report, sizeof(report));
     capture_t before[PS5LOOP_NEWEST];
     captures_newest(before);
-    pad_tap(PS5LOOP_BUTTON_CREATE, hold_ms);
+    pad_tap(shooter, PS5LOOP_BUTTON_CREATE, hold_ms);
     off_t last_size = -1;
     const uint64_t deadline = monotonic_us() + PS5LOOP_SHOT_WAIT_MS * 1000ull;
     while (monotonic_us() < deadline)
@@ -2310,6 +2402,28 @@ static char *hwinfo_json(void)
                            h.railmA[1]);
     else
         json = text_append(json, &cap, &used, "\"power\":null,");
+    // "pads": the virtual pads, for the dashboard's connected lights: open, and
+    // whether the last sample reached the system (lastInsert 0). No user names:
+    // the page shows which pad, not whose. "pad" repeats pad 1, as older pages read it.
+    {
+        pad_slot_t copy[PS5LOOP_PADS];
+        pthread_mutex_lock(&g_pad.lock);
+        memcpy(copy, g_pad.slot, sizeof(copy));
+        pthread_mutex_unlock(&g_pad.lock);
+        json = text_append(json, &cap, &used, "\"pads\":[");
+        for (int n = 0; json != NULL && n < PS5LOOP_PADS; n++)
+            json = text_append(json, &cap, &used,
+                               "%s{\"n\":%d,\"open\":%s,\"device\":\"0x%llx\",\"user\":\"0x%08x\","
+                               "\"lastInsert\":\"0x%08x\",\"inserts\":%u}",
+                               n ? "," : "", n + 1, copy[n].open ? "true" : "false",
+                               (unsigned long long)copy[n].device_id, (uint32_t)copy[n].user_id,
+                               (uint32_t)copy[n].last_insert, copy[n].inserts);
+        json = text_append(json, &cap, &used,
+                           "],\"pad\":{\"open\":%s,\"device\":\"0x%llx\",\"user\":\"0x%08x\","
+                           "\"lastInsert\":\"0x%08x\",\"inserts\":%u},",
+                           copy[0].open ? "true" : "false", (unsigned long long)copy[0].device_id,
+                           (uint32_t)copy[0].user_id, (uint32_t)copy[0].last_insert, copy[0].inserts);
+    }
     if (h.coresOk)
     {
         json = text_append(json, &cap, &used, "\"coreMHz\":[");
@@ -3662,14 +3776,14 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     }
     if (strcmp(command, "ping") == 0)
     {
-        reply(client, "ok ps5loop 1 pid=%d fw=0x%08x pad=%s probe=0x%llx kproc=0x%lx", (int)getpid(),
-              kernel_get_fw_version(), g_pad.open ? "open" : "closed",
-              (unsigned long long)(uintptr_t)g_probe, (long)kernel_get_proc(getpid()));
+        reply(client, "ok ps5loop 1 pid=%d fw=0x%08x pad=%s pads=%d probe=0x%llx kproc=0x%lx",
+              (int)getpid(), kernel_get_fw_version(), g_pad.slot[0].open ? "open" : "closed",
+              pads_open(), (unsigned long long)(uintptr_t)g_probe, (long)kernel_get_proc(getpid()));
         return 0;
     }
     if (strcmp(command, "quit") == 0)
     {
-        pad_close(report, sizeof(report));
+        pad_close_all(report, sizeof(report));
         reply(client, "ok bye %s", report);
         return -1;
     }
@@ -4206,39 +4320,71 @@ static int handle_command(int client, char *line, const char *body, size_t body_
         return 0;
     }
 
-    const char *const action = strtok(NULL, " \t");
+    // "pad [N] ACTION ...": N (1-4) picks the pad; without it, pad 1.
+    const char *action = strtok(NULL, " \t");
+    int n = 0;
+    if (action != NULL && action[0] >= '1' && action[0] <= '0' + PS5LOOP_PADS && action[1] == '\0')
+    {
+        n = action[0] - '1';
+        action = strtok(NULL, " \t");
+    }
+    pad_slot_t *const pad = &g_pad.slot[n];
     const char *arguments[7] = {0};
     int count = 0;
     while (count < 7 && (arguments[count] = strtok(NULL, " \t")) != NULL)
         count++;
     if (action == NULL)
     {
-        reply(client, "err usage: pad open|close|status|set|tap|handle|bind");
+        reply(client, "err usage: pad [1-4] open|close|status|set|tap|handle|bind|evict, or pad list");
+        return 0;
+    }
+    if (strcmp(action, "list") == 0)
+    {
+        char line[PS5LOOP_LINE - 64];
+        size_t used = 0;
+        for (int k = 0; k < PS5LOOP_PADS; k++)
+        {
+            const pad_slot_t *const slot = &g_pad.slot[k];
+            const int written =
+                slot->open ? snprintf(line + used, sizeof(line) - used,
+                                      " %d:open,device=0x%llx,user=0x%08x,last=0x%08x", k + 1,
+                                      (unsigned long long)slot->device_id, (uint32_t)slot->user_id,
+                                      (uint32_t)slot->last_insert)
+                           : snprintf(line + used, sizeof(line) - used, " %d:closed", k + 1);
+            if (written > 0 && used + (size_t)written < sizeof(line))
+                used += (size_t)written;
+        }
+        line[used] = '\0';
+        reply(client, "ok pads open=%d%s", pads_open(), line);
         return 0;
     }
     if (strcmp(action, "open") == 0)
     {
-        // "pad open [USER] [keep]": keep leaves real controllers connected.
-        const bool keep = (count > 0 && strcmp(arguments[0], "keep") == 0) ||
+        // "pad [N] open [USER] [keep]": keep leaves real controllers connected.
+        // Pads 2-4 always keep them: only pad 1 needs to be its user's first.
+        const bool keep = n > 0 || (count > 0 && strcmp(arguments[0], "keep") == 0) ||
                           (count > 1 && strcmp(arguments[1], "keep") == 0);
         const int32_t user =
             (count > 0 && strcmp(arguments[0], "keep") != 0) ? (int32_t)strtoul(arguments[0], NULL, 0) : -1;
-        const int status = pad_open(user, !keep, report, sizeof(report));
+        const int status = pad_open(n, user, !keep, report, sizeof(report));
         reply(client, "%s pad %s%s", status == 0 ? "ok" : "err", status == 0 ? "open " : "", report);
         return 0;
     }
     if (strcmp(action, "close") == 0)
     {
-        pad_close(report, sizeof(report));
+        if (count > 0 && strcmp(arguments[0], "all") == 0)
+            pad_close_all(report, sizeof(report));
+        else
+            pad_close(n, report, sizeof(report));
         reply(client, "ok pad closed %s", report);
         return 0;
     }
     if (strcmp(action, "status") == 0)
     {
-        reply(client, "ok pad %s handle=0x%x device=0x%llx user=0x%08x inserts=%u last=0x%08x",
-              g_pad.open ? "open" : "closed", (uint32_t)g_pad.handle,
-              (unsigned long long)g_pad.device_id, (uint32_t)g_pad.user_id, g_pad.inserts,
-              (uint32_t)g_pad.last_insert);
+        reply(client, "ok pad %d %s handle=0x%x device=0x%llx user=0x%08x inserts=%u last=0x%08x", n + 1,
+              pad->open ? "open" : "closed", (uint32_t)pad->handle,
+              (unsigned long long)pad->device_id, (uint32_t)pad->user_id, pad->inserts,
+              (uint32_t)pad->last_insert);
         return 0;
     }
     if (strcmp(action, "bind") == 0 && count >= 1)
@@ -4262,10 +4408,13 @@ static int handle_command(int client, char *line, const char *body, size_t body_
         // that place the virtual pad is the second, which no title opens:
         // disconnecting the real one (PS on it brings it back) leaves ours first.
         const uint64_t device_id = strtoull(arguments[0], NULL, 16);
+        bool ours = false;
+        for (int k = 0; k < PS5LOOP_PADS; k++)
+            ours = ours || (g_pad.slot[k].open && g_pad.slot[k].device_id == device_id);
         if (pad_libraries(report, sizeof(report)) != 0 || mbus_disconnect == NULL)
             reply(client, "err pad evict %s", report);
-        else if (device_id == 0 || device_id == g_pad.device_id)
-            reply(client, "err pad evict: name another device's id");
+        else if (device_id == 0 || ours)
+            reply(client, "err pad evict: name another device's id, not a virtual pad's");
         else
             reply(client, "ok pad evict device=0x%llx result=0x%08x",
                   (unsigned long long)device_id, (uint32_t)mbus_disconnect(device_id));
@@ -4279,17 +4428,18 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             return 0;
         }
         pthread_mutex_lock(&g_pad.lock);
-        pad_neutral(&g_pad.state);
-        g_pad.handle = (int32_t)strtoul(arguments[0], NULL, 0);
-        g_pad.open = true;
-        const int32_t result = pad_insert(g_pad.handle, &g_pad.state);
+        pad_neutral(&pad->state);
+        pad->handle = (int32_t)strtoul(arguments[0], NULL, 0);
+        pad->open = true;
+        const int32_t result = pad_insert(pad->handle, &pad->state);
         pthread_mutex_unlock(&g_pad.lock);
-        reply(client, "ok pad handle=0x%x insert=0x%08x", (uint32_t)g_pad.handle, (uint32_t)result);
+        reply(client, "ok pad %d handle=0x%x insert=0x%08x", n + 1, (uint32_t)pad->handle,
+              (uint32_t)result);
         return 0;
     }
-    if (!g_pad.open)
+    if (!pad->open)
     {
-        reply(client, "err pad %s: the pad is not open", action);
+        reply(client, "err pad %d %s: that pad is not open", n + 1, action);
         return 0;
     }
     if (strcmp(action, "set") == 0 && count == 7)
@@ -4304,7 +4454,7 @@ static int handle_command(int client, char *line, const char *body, size_t body_
                 return 0;
             }
         }
-        pad_hold((uint32_t)strtoul(arguments[0], NULL, 16), axes[0], axes[1], axes[2], axes[3],
+        pad_hold(n, (uint32_t)strtoul(arguments[0], NULL, 16), axes[0], axes[1], axes[2], axes[3],
                  axes[4], axes[5]);
         reply(client, "ok pad set");
         return 0;
@@ -4317,8 +4467,8 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             reply(client, "err pad tap: hold 1 to 10000 ms");
             return 0;
         }
-        pad_tap((uint32_t)strtoul(arguments[0], NULL, 16), hold_ms);
-        reply(client, "ok pad tap last=0x%08x", (uint32_t)g_pad.last_insert);
+        pad_tap(n, (uint32_t)strtoul(arguments[0], NULL, 16), hold_ms);
+        reply(client, "ok pad tap last=0x%08x", (uint32_t)pad->last_insert);
         return 0;
     }
     reply(client, "err usage: pad %s", action);

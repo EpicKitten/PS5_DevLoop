@@ -11,8 +11,12 @@ Commands:
   open [USERID]         create the virtual pad, give it to the foreground user, close
                         the prompt the console raises, and disconnect any real
                         controller so that titles read the pad
-  close                 remove it
+  close [--all]         remove it (--all: every virtual pad)
   status                the pad's handle, device, user and last insert result
+  pads                  every virtual pad's state. Up to 4 pads: --pad N (1-4) on open,
+                        close, status, press, hold, release and seq picks one; pads 2-4
+                        go to the next signed-in user without a pad and never
+                        disconnect a real controller
   press BUTTONS [--ms]  press and release: "cross", "l1+r1", "down"
   hold BUTTONS [--lx ..] hold buttons, sticks (0-255, 128 centre) and triggers
   release               let everything go
@@ -197,11 +201,19 @@ def command(line, timeout=30.0, payload=False):
         return answer, rest[:size]
 
 
+def pad_word(args):
+    """The command prefix for the pad --pad names: "pad" for pad 1, "pad N" otherwise."""
+    n = getattr(args, "pad", 1) or 1
+    return "pad" if n == 1 else f"pad {n}"
+
+
 def open_pad(args):
     """Create the pad, close the console's prompt, and (unless --beside) make the
     pad its user's first by disconnecting any real controller. The eviction runs
-    in the payload, off the console's own kernel log, so it needs no klog server."""
-    line = "pad open"
+    in the payload, off the console's own kernel log, so it needs no klog server.
+    Pads 2-4 (--pad) go to the next signed-in user without one and never disconnect
+    a controller."""
+    line = f"{pad_word(args)} open"
     if args.user:
         line += f" {args.user}"
     if args.beside:
@@ -214,7 +226,7 @@ def open_pad(args):
         # The console asks who the new controller belongs to although it is bound
         # already; Circle, from the pad itself, closes the question.
         time.sleep(1.5)
-        command(f"pad tap {BUTTONS['circle']:x} 80")
+        command(f"{pad_word(args)} tap {BUTTONS['circle']:x} 80")
     return 0
 
 
@@ -320,7 +332,7 @@ def sequence(args):
         if name == "wait":
             time.sleep(int(value or 500) / 1000)
             continue
-        answer, _ = command(f"pad tap {mask(name):x} {int(value or args.ms)}")
+        answer, _ = command(f"{pad_word(args)} tap {mask(name):x} {int(value or args.ms)}")
         if not answer.startswith("ok"):
             return say(answer)
         time.sleep(args.gap / 1000)
@@ -470,8 +482,10 @@ def main():
                          help="leave the console's \"Who's using this controller?\" prompt up")
     opening.add_argument("--beside", action="store_true",
                          help="leave a real controller connected (titles then read it, not the pad)")
-    commands.add_parser("close")
-    commands.add_parser("status")
+    closing = commands.add_parser("close")
+    closing.add_argument("--all", action="store_true", help="close every virtual pad")
+    status = commands.add_parser("status")
+    commands.add_parser("pads", help="every virtual pad's state (up to 4)")
     press = commands.add_parser("press")
     press.add_argument("buttons")
     press.add_argument("--ms", type=int, default=80)
@@ -484,6 +498,10 @@ def main():
     steps.add_argument("steps", nargs="+")
     steps.add_argument("--ms", type=int, default=80, help="how long each press is held")
     steps.add_argument("--gap", type=int, default=250, help="the pause after each press")
+    release = commands.choices["release"]
+    for sub in (opening, closing, status, press, hold, release, steps):
+        sub.add_argument("--pad", type=int, choices=range(1, 5), default=1,
+                         help="which virtual pad, 1-4 (default 1)")
     screenshot = commands.add_parser("screenshot")
     screenshot.add_argument("file", nargs="?")
     screenshot.add_argument("--hold", type=int, default=0, help="how long Create is held, in ms")
@@ -749,15 +767,16 @@ def main():
         print(f"ok http {len(data)} bytes ({first}) -> {out}")
         return 0
     if args.command == "press":
-        return say(command(f"pad tap {mask(args.buttons):x} {args.ms}")[0])
+        return say(command(f"{pad_word(args)} tap {mask(args.buttons):x} {args.ms}")[0])
     if args.command == "hold":
         buttons = mask(args.buttons) if args.buttons else 0
-        return say(command(f"pad set {buttons:x} {args.lx} {args.ly} {args.rx} {args.ry} "
+        return say(command(f"{pad_word(args)} set {buttons:x} {args.lx} {args.ly} {args.rx} {args.ry} "
                            f"{args.l2} {args.r2}")[0])
     if args.command == "release":
-        return say(command("pad set 0 128 128 128 128 0 0")[0])
-    line = {"ping": "ping", "list-captures": "list-captures", "status": "pad status",
-            "close": "pad close", "raw": " ".join(getattr(args, "words", []))}[args.command]
+        return say(command(f"{pad_word(args)} set 0 128 128 128 128 0 0")[0])
+    line = {"ping": "ping", "list-captures": "list-captures", "status": f"{pad_word(args)} status",
+            "close": "pad close all" if getattr(args, "all", False) else f"{pad_word(args)} close",
+            "pads": "pad list", "raw": " ".join(getattr(args, "words", []))}[args.command]
     return say(command(line)[0])
 
 

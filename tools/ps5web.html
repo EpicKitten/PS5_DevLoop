@@ -205,6 +205,24 @@
   .ds .stick .knob { width: 38px; height: 38px; margin: -19px 0 0 -19px; }
   .ds .stick-col { gap: 4px; }
   .ds .stick-col .hint b { font-size: 11px; }
+  /* connected state: a pill in the card title, and the outline's light bar */
+  .pad-state { display: inline-flex; align-items: center; gap: 6px; margin-left: 8px; padding: 1px 8px;
+    border: 1px solid var(--line); border-radius: 999px; font-size: 11px; font-weight: 600; color: var(--muted);
+    vertical-align: 1px; }
+  .pad-state i { width: 8px; height: 8px; border-radius: 50%; background: #4a5870; }
+  .pad-state.on { color: var(--cool); border-color: #2c6b57; } .pad-state.on i { background: var(--cool); box-shadow: 0 0 8px var(--cool); }
+  .pad-state.warn { color: var(--warm); border-color: #6b5a2c; } .pad-state.warn i { background: var(--warm); box-shadow: 0 0 8px var(--warm); }
+  .pad-tabs button { display: inline-flex; align-items: center; gap: 5px; padding: 4px 11px; }
+  .pad-tabs button i { width: 7px; height: 7px; border-radius: 50%; background: #4a5870; }
+  .pad-tabs button.on i { background: var(--cool); box-shadow: 0 0 6px var(--cool); }
+  .pad-tabs button.warn i { background: var(--warm); }
+  .pad-tabs button.sel { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .pad-tabs-row { margin-top: 0; }
+  .ds { position: relative; }
+  .ds-light { position: absolute; top: 5px; left: 34%; right: 34%; height: 3px; border-radius: 3px; background: #26324a;
+    transition: background .3s, box-shadow .3s; pointer-events: none; }
+  .ds-light.on { background: var(--accent); box-shadow: 0 0 10px var(--accent), 0 0 2px var(--accent); }
+  .ds-light.warn { background: var(--warm); box-shadow: 0 0 10px var(--warm); }
   /* a phone: a smaller pad, so the D-pad and face buttons keep clear of the touchpad */
   @media (max-width: 480px) {
     .ds { gap: 8px 4px; padding: 10px 6px 8px; border-radius: 20px 20px 44px 44px; }
@@ -441,20 +459,29 @@
 
     <!-- virtual pad -->
     <div data-sec="Control" class="pcard">
-      <h3>Virtual pad <small>input</small></h3>
-      <div class="row">
-        <button title="Create the virtual DualSense and give it to the signed-in user; disconnects the real controller so titles read this one (PS on the real pad reconnects it)" class="go" onclick="run('pad open')">Open</button>
-        <button title="Create the virtual pad beside the real controller, which stays connected; works on the home screen, but titles read only the first controller" onclick="run('pad open keep')">Open · beside</button>
-        <button title="Remove the virtual pad; press PS on the real controller to reconnect it" onclick="run('pad close')">Close</button>
-        <button title="Show the virtual pad&#x27;s handle, device id, user and last input result" onclick="run('pad status')">Status</button>
+      <h3>Virtual pad <small>input</small>
+        <span class="pad-state" id="pad-state" title="Whether the virtual pad is connected (read from the payload every poll)"><i></i><span>—</span></span></h3>
+      <div class="row pad-tabs-row"><label>Pad</label>
+        <div class="seg pad-tabs" id="pad-tabs" role="tablist" aria-label="Which virtual pad the controls drive">
+          <button data-pad="1" role="tab" title="Pad 1: the foreground user's (Open disconnects the real controller so titles read it)"><i></i>1</button><button data-pad="2" role="tab" title="Pad 2: goes to the next signed-in user without a pad; never disconnects a controller"><i></i>2</button><button data-pad="3" role="tab" title="Pad 3: goes to the next signed-in user without a pad; never disconnects a controller"><i></i>3</button><button data-pad="4" role="tab" title="Pad 4: goes to the next signed-in user without a pad; never disconnects a controller"><i></i>4</button>
+        </div>
+        <span class="note" id="pad-count"></span>
+        <button class="mini" title="Close every virtual pad" onclick="run('pad close all')">Close all</button>
       </div>
-      <div class="hint">Open takes the controller from the player (unless · beside). A title needs the pad open before it reads a press.</div>
+      <div class="row">
+        <button title="Create the virtual DualSense and give it to the signed-in user; disconnects the real controller so titles read this one (PS on the real pad reconnects it)" class="go" onclick="run(padCmd('open'))">Open</button>
+        <button title="Create the virtual pad beside the real controller, which stays connected; works on the home screen, but titles read only the first controller" onclick="run(padCmd('open keep'))">Open · beside</button>
+        <button title="Remove the virtual pad; press PS on the real controller to reconnect it" onclick="run(padCmd('close'))">Close</button>
+        <button title="Show the virtual pad&#x27;s handle, device id, user and last input result" onclick="run(padCmd('status'))">Status</button>
+      </div>
+      <div class="hint">Open takes the controller from the player (unless · beside). A title needs the pad open before it reads a press. Up to four pads: pick one above and Open it; pads 2-4 go to the next signed-in user without a pad (with none free, the console asks who is using it).</div>
       <div class="row"><label>Hold</label>
         <input type="number" id="pad-ms" value="100" min="1" max="10000"> <span class="hint" style="margin:0">ms per tap</span>
       </div>
       <!-- laid out as a DualSense: shoulders on top, the D-pad and face buttons on the
            wings, Create / touchpad / Options and PS in the middle, the sticks below -->
       <div class="ds">
+        <i class="ds-light" id="ds-light" aria-hidden="true"></i>
         <div class="ds-sh ds-lsh">
           <div class="ds-trig"><button class="ds-l2" onclick="tap('l2')" title="Tap L2 fully (use the slider beside it for a partial pull)">L2</button>
             <input type="range" id="trig-l2" data-trig="0" min="0" max="255" value="0" aria-label="L2 pull" title="drag for a partial L2 pull"><b id="trig-l2-val">0</b></div>
@@ -1197,6 +1224,7 @@ async function poll() {
     showSerial();
     document.getElementById("mhz").textContent = d.cpuMHz == null ? "—" : d.cpuMHz;
     renderCores(d.coreMHz);
+    renderPadState(d.pad, d.pads);
     const socMax = d.socMax != null ? d.socMax : d.socC;
     document.getElementById("soc-sub").textContent =
       d.socMaxId != null && d.socMaxId >= 0 ? "#" + d.socMaxId : "";
@@ -1466,7 +1494,7 @@ async function sendSticks() {
     for (;;) {
       // a pulled trigger also sets its button bit, as a real pad does
       const buttons = stickButtons | (trigger[0] ? BTN.l2 : 0) | (trigger[1] ? BTN.r2 : 0);
-      const want = "pad set " + buttons.toString(16) + " " + [...stick.l, ...stick.r, ...trigger].join(" ");
+      const want = padCmd("set " + buttons.toString(16) + " " + [...stick.l, ...stick.r, ...trigger].join(" "));
       if (want === stickSent) break;
       const r = await fetch("/api/run?c=" + encodeURIComponent(want), { cache: "no-store" });
       const reply = (await r.text()).trim();
@@ -1534,7 +1562,7 @@ document.getElementById("trig-latch").onchange = e => { if (!e.target.checked) r
 // one is held the press is sent with those positions, then the same without it.
 async function tap(name) {
   const ms = parseInt(val("pad-ms"), 10) || 100;
-  if (sticksIdle()) { run("pad tap " + BTN[name].toString(16) + " " + ms); return; }
+  if (sticksIdle()) { run(padCmd("tap " + BTN[name].toString(16) + " " + ms)); return; }
   logLine("» press " + name + " (with a stick or trigger held)", "cmd");
   stickButtons |= BTN[name];
   sendSticks();
@@ -1681,7 +1709,7 @@ async function typeText() {
     for (let i = 0; i < steps.length; i++) {
       if (typingStop) throw new Error("stopped after " + i + " of " + steps.length + " presses");
       const [name, wait] = steps[i];
-      const r = await fetch("/api/run?c=" + encodeURIComponent("pad tap " + BTN[name].toString(16) + " " + holdMs),
+      const r = await fetch("/api/run?c=" + encodeURIComponent(padCmd("tap " + BTN[name].toString(16) + " " + holdMs)),
         { cache: "no-store" });
       const reply = (await r.text()).trim();
       if (!/^ok\b/.test(reply)) throw new Error("press " + (i + 1) + " failed: " + (reply || "no reply") + " (is the pad open?)");
@@ -1710,6 +1738,62 @@ function getFile() {
 }
 
 document.getElementById("clear").onclick = () => { out.textContent = ""; out.dataset.virgin = "1"; };
+
+// ---- several virtual pads: which one the controls drive ----
+// "pad N ..." addresses pad N (1-4); pad 1 is sent as plain "pad ...", which every
+// payload understands.
+const PAD_KEY = "ps5devloop.pad";
+let curPad = 1, lastPads = null, lastPad = null;
+try { const v = Number(localStorage.getItem(PAD_KEY)); if (v >= 1 && v <= 4) curPad = v; } catch (e) { /* no storage */ }
+const padCmd = rest => (curPad > 1 ? "pad " + curPad + " " : "pad ") + rest;
+function selectPad(n) {
+  if (n === curPad) return;
+  // let go of anything held on the pad being left, so it does not keep pulling
+  if (!sticksIdle()) releaseTriggers();
+  curPad = n;
+  try { localStorage.setItem(PAD_KEY, String(n)); } catch (e) { /* no storage */ }
+  renderPadState(lastPad, lastPads);
+}
+document.querySelectorAll("#pad-tabs button").forEach(b => b.onclick = () => selectPad(Number(b.dataset.pad)));
+document.querySelector(`#pad-tabs button[data-pad="${curPad}"]`).classList.add("sel");
+
+// ---- the virtual pads' connected lights (hwinfo's "pads"; "pad" on older payloads) ----
+// connected: open and its last sample reached the system; input failing: open but
+// the last sample was refused; not connected: no pad (or an older payload).
+const padClass = p => !p || !p.open ? "" : p.lastInsert === "0x00000000" ? "on" : "warn";
+function renderPadState(single, pads) {
+  lastPad = single; lastPads = Array.isArray(pads) ? pads : null;
+  const list = lastPads || [single || null, null, null, null];
+  document.querySelectorAll("#pad-tabs button").forEach(b => {
+    const n = Number(b.dataset.pad), p = list[n - 1];
+    const cls = padClass(p);
+    b.className = (cls ? cls + " " : "") + (n === curPad ? "sel" : "");
+    b.setAttribute("aria-selected", String(n === curPad));
+    const base = b.title.split(" — ")[0];
+    b.title = base + (p && p.open ? " — open" : "");
+  });
+  const open = list.filter(p => p && p.open).length;
+  document.getElementById("pad-count").textContent = lastPads ? open + " of 4 open" : "";
+  renderOnePad(list[curPad - 1], !!single || !!lastPads);
+}
+function renderOnePad(pad, known) {
+  const pill = document.getElementById("pad-state"), light = document.getElementById("ds-light");
+  let cls = "", text = "not connected", tip = "No virtual pad: Open creates one";
+  if (pad && pad.open) {
+    const ok = pad.lastInsert === "0x00000000";
+    cls = ok ? "on" : "warn";
+    text = ok ? "connected" : "input failing";
+    tip = `device ${pad.device}, user ${pad.user}, last input ${pad.lastInsert}, ${pad.inserts} samples sent` +
+      (ok ? "" : " (the system refused the last sample: try Close, then Open)");
+  } else if (!known) {
+    text = "unknown"; tip = "This payload does not report the pad state";
+  }
+  text = "pad " + curPad + " " + text;
+  pill.className = "pad-state" + (cls ? " " + cls : "");
+  pill.lastElementChild.textContent = text;
+  pill.title = tip;
+  light.className = "ds-light" + (cls ? " " + cls : "");
+}
 
 // ---- per-core clocks (hwinfo's coreMHz: the SMU's clock for each of the 8 cores) ----
 let coreScale = 3500;
