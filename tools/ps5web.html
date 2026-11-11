@@ -605,8 +605,9 @@
         <button title="Sound the console&#x27;s beeper with this pattern" onclick="run('beeper ' + val('beep-p'))">Beep</button>
         <button title="Mute the console&#x27;s beeper (a lasting setting)" onclick="run('beeper mute 1')">Mute</button>
         <button title="Unmute the console&#x27;s beeper" onclick="run('beeper mute 0')">Unmute</button>
-        <select id="beep-v"><option>0</option><option>1</option><option selected>2</option></select>
-        <button title="Set the beeper volume (0-2; a lasting setting)" onclick="run('beeper vol ' + val('beep-v'))">Vol</button></div>
+        <select id="beep-v" title="The beeper's dim level: 0 is the loudest (and sounds like a different speaker), 1 and 2 are softer"><option value="0">0 · full</option><option value="1">1 · soft</option><option value="2" selected>2 · softest</option></select>
+        <button title="Set the beeper's dim level (a lasting setting): 0 full, 1 soft, 2 softest" onclick="run('beeper dim ' + val('beep-v')).then(loadHardware)">Dim</button>
+        <span class="note" id="beep-now" title="The beeper settings the console holds now (read with the hardware cards)"></span></div>
       <div class="row"><label>Lightbar</label>
         <input type="number" id="lb-r" value="0" min="0" max="255">
         <input type="number" id="lb-g" value="0" min="0" max="255">
@@ -1752,6 +1753,7 @@ function hexdump(b) {
 const rawBlock = (title, h) => h ? `<div class="note" style="margin-top:8px">${esc(title)}</div><pre class="hexdump">${esc(hexdump(hexBytes(h)))}</pre>` : "";
 
 // ---- hardware: GET /api/hwdetail (ICC counters and logs, SMU clocks, system facts) ----
+const BEEP_DIM = ["full", "soft", "softest"];
 function renderHardware(d) {
   const open = d.boots != null && d.shutdowns != null ? d.boots - d.shutdowns : null;
   const drift = d.srtc && d.now ? d.srtc - d.now : null;
@@ -1794,7 +1796,11 @@ function renderHardware(d) {
     ["Thermal alert", flag(d.thermalAlert, "ALERT", "none")],
     ["ICC HDMI · crash", `${txt(d.iccHdmi)} · ${txt(d.iccCrash)}`, "icc_hdmi 0x4001c301 · icc_crash_report 0x4001c101"],
     ["CPU info bit · EMC BT", `${hx(d.cpuInfoBit)} · ${hx(d.emcBt)}`],
+    ["Beeper", d.beeperDim == null ? "—" : `${BEEP_DIM[d.beeperDim] || "dim " + d.beeperDim}${d.beeperOff ? " · <b>muted</b>" : ""}`,
+      "the ICC's buzzer settings: dim (0 full, 1 soft, 2 softest) and off"],
   ]);
+  const now = document.getElementById("beep-now");
+  if (now) now.textContent = d.beeperDim == null ? "" : "now " + (BEEP_DIM[d.beeperDim] || "dim " + d.beeperDim) + (d.beeperOff ? ", muted" : "");
   const aer = d.pciAer ? hexBytes(d.pciAer) : null;
   const aerWords = aer ? Array.from({ length: aer.length >> 2 }, (_, i) => u32(aer, i * 4)) : null;
   const umc = d.umcErate ? hexBytes(d.umcErate) : null;

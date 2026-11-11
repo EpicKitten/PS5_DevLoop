@@ -122,7 +122,7 @@ disable that first.
 | `led BWA` / `off` / `auto` / `breathe B W A [MS]` / `chase [MS]` | the console indicator LED (static, off, system-controlled, or an animated effect), via `/dev/icc_indicator` |
 | `fan [TEMP]` | read the fan duty, or set the manual threshold (30..90 °C), via `/dev/icc_fan` |
 | `fan hold TEMP [SECS]` / `off` | re-apply the threshold every `SECS` s (default 7) in a background thread — a one-shot `fan set` is reverted by the system, so hold keeps it pinned (idea from [owendswang/ps5-fan-control](https://github.com/owendswang/ps5-fan-control)) |
-| `beeper [PATTERN]` / `mute 0\|1` / `vol 0..2` | beep the console, or set its mute / volume (`sceKernelIccSetBuzzer*`) |
+| `beeper [PATTERN]` / `mute 0\|1` / `dim 0..2` / `status` | beep the console, set its mute or dim level, or read both back (`sceKernelIccSetBuzzer*`; the ICC's `0x4001950d`/`0x4001950f` getters). Dim is a byte the ICC interprets: by ear on a CFI-2015, 0 is the loudest and sounds like a different speaker, 1 and 2 are softer in the same tone; `vol` is an alias |
 | `kill PID` | end a process (not just a registered app) |
 | `peek PID ADDR LEN` / `poke PID ADDR HEX` | read / write a process's memory (writes are read back and verified) |
 | `scan PID ADDR LEN W VALUE` | find a `W`-byte integer (`W` = 1/2/4/8) in a span of a process's memory |
@@ -140,7 +140,7 @@ byte-for-byte), `hash` (matches `sha256sum` for a 1 MB file and an empty file),
 (ptrace thread-hijack, proved against a disposable sleeper: `getpid`→its own pid,
 `abs(-5)`→5, target survived), `hwinfo`
 (all 64 SoC sensors answer), `df`, `led`/`fan`/`beeper` (ICC ioctls/calls return
-success, including the `breathe`/`chase`/`auto` effects and beeper `mute`/`vol`),
+success, including the `breathe`/`chase`/`auto` effects and beeper `mute`/`dim`),
 `scan`/`scan-aob` (hit a known probe), `kern-read`/`kern-write` and `setting-set`
 (verified), `notify`, `peek`, `http`, the UDP beacon and `klog-stream`, and the
 console-hosted dashboard with its control panel (`GET /`, `GET /api/hwinfo`,

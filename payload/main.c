@@ -67,7 +67,9 @@
  *   lightbar R G B            attempt the physical pad lightbar (shell owns it)
  *   fan [set TEMP]            read the fan duty, or set the threshold (30..90 C)
  *   fan hold TEMP [SECS]      re-apply the threshold every SECS s (default 7); fan hold off
- *   beeper [PATTERN]|mute 0|1|vol 0..2   beep, mute, or set the beeper volume
+ *   beeper [PATTERN]|mute 0|1|dim 0..2|status   beep, mute, set the beeper's dim
+ *                             level (0 full, 1 soft, 2 softest; "vol" is an alias),
+ *                             or read both settings back
  *   GET / , GET /api/hwinfo   a browser gets the live dashboard, hosted here
  *   GET /api/hwdetail, /api/display   the two JSON readings above
  *   GET /api/run?c=CMD        the dashboard runs any command above; the reply
@@ -2552,6 +2554,9 @@ static char *hwdetail_json(void)
         json = json_dev_int(json, &cap, &used, "bd402", "/dev/icc_bddrive", 0x4004c402ul);
         json = json_dev_int(json, &cap, &used, "bd404", "/dev/icc_bddrive", 0x4001c404ul);
         json = json_dev_int(json, &cap, &used, "iccThermal", "/dev/icc_thermal", 0x40019003ul);
+        // the beeper's persistent settings: dim (0 full, 1 soft, 2 softest) and off
+        json = json_dev_int(json, &cap, &used, "beeperDim", "/dev/icc_indicator", 0x4001950dul);
+        json = json_dev_int(json, &cap, &used, "beeperOff", "/dev/icc_indicator", 0x4001950ful);
     }
 
     // the last boot's stage timestamps (96 u32, zero where a stage did not run)
@@ -2996,7 +3001,33 @@ static void fan_hold_command(int client, const char *temp_text, const char *secs
 
 // Beeper: the sceKernelIccSetBuzzer* calls are not stubs in this SDK, so resolve
 // them from a loaded libkernel at run time (PS5-Suite resolves them the same
-// way). `beep` sounds a pattern (once); `mute` and `vol` are persistent.
+// way). `beep` sounds a pattern (once); `mute` and `dim` are persistent.
+//
+// "dim" is sceKernelIccSetBuzzerDimSetting, which libkernel passes to the ICC as
+// one byte (ioctl 0x8001950c on /dev/icc_indicator, no range check); the getters
+// read it back (0x4001950d dim, 0x4001950f off). The ICC gives it its meaning. By
+// ear on a CFI-2015 (12.20): 0 is the loudest and sounds like a different
+// speaker (likely undimmed drive), 1 is softer, 2 softer still in the same tone.
+// So 0 = full, 1 = soft, 2 = softest; "vol" is kept as an alias for "dim".
+#define ICC_INDICATOR_BUZZER_DIM_GET 0x4001950dul
+#define ICC_INDICATOR_BUZZER_OFF_GET 0x4001950ful
+
+// The persistent buzzer settings, read from the ICC: dim (0 full .. 2 softest) and
+// off (1 = muted). -1 where a read fails.
+static void beeper_settings(int *dim, int *off)
+{
+    *dim = *off = -1;
+    const int fd = open("/dev/icc_indicator", O_RDONLY);
+    if (fd < 0)
+        return;
+    uint8_t v = 0;
+    if (ioctl(fd, ICC_INDICATOR_BUZZER_DIM_GET, &v) == 0)
+        *dim = v;
+    v = 0;
+    if (ioctl(fd, ICC_INDICATOR_BUZZER_OFF_GET, &v) == 0)
+        *off = v;
+    close(fd);
+}
 static int (*icc_buzzer_fn(const char *symbol))(int)
 {
     const char *const libs[] = {"libkernel_sys.sprx", "libkernel.sprx", "libkernel_web.sprx"};
@@ -3016,6 +3047,14 @@ static int (*icc_buzzer_fn(const char *symbol))(int)
 static void beeper_command(int client, const char *action, int value)
 {
     ensure_elevated();
+    int dim, off;
+    if (action != NULL && strcmp(action, "status") == 0)
+    {
+        beeper_settings(&dim, &off);
+        reply(client, "%s beeper dim=%d off=%d (dim: 0 full, 1 soft, 2 softest)",
+              dim >= 0 && off >= 0 ? "ok" : "err", dim, off);
+        return;
+    }
     const char *symbol = "sceKernelIccSetBuzzer"; // pattern 0..3, one shot
     const char *what = "pattern";
     if (action != NULL && strcmp(action, "mute") == 0)
@@ -3023,10 +3062,10 @@ static void beeper_command(int client, const char *action, int value)
         symbol = "sceKernelIccSetBuzzerOffSetting"; // 1 = off (persistent)
         what = "mute";
     }
-    else if (action != NULL && strcmp(action, "vol") == 0)
+    else if (action != NULL && (strcmp(action, "dim") == 0 || strcmp(action, "vol") == 0))
     {
-        symbol = "sceKernelIccSetBuzzerDimSetting"; // 0..2 volume (persistent)
-        what = "vol";
+        symbol = "sceKernelIccSetBuzzerDimSetting"; // 0 full, 1 soft, 2 softest (persistent)
+        what = "dim";
     }
     int (*fn)(int) = icc_buzzer_fn(symbol);
     if (fn == NULL)
@@ -3035,8 +3074,9 @@ static void beeper_command(int client, const char *action, int value)
         return;
     }
     const int rc = fn(value);
-    reply(client, "%s beeper %s=%d result=0x%08x", rc == 0 ? "ok" : "err", what, value,
-          (uint32_t)rc);
+    beeper_settings(&dim, &off); // what the ICC holds now
+    reply(client, "%s beeper %s=%d result=0x%08x now dim=%d off=%d", rc == 0 ? "ok" : "err", what,
+          value, (uint32_t)rc, dim, off);
 }
 
 // df: free space per mounted volume.
@@ -4028,11 +4068,15 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     if (strcmp(command, "beeper") == 0)
     {
         const char *const sub = strtok(NULL, " \t");
-        if (sub != NULL && (strcmp(sub, "mute") == 0 || strcmp(sub, "vol") == 0))
+        if (sub != NULL && strcmp(sub, "status") == 0)
+            beeper_command(client, sub, 0);
+        else if (sub != NULL &&
+                 (strcmp(sub, "mute") == 0 || strcmp(sub, "dim") == 0 || strcmp(sub, "vol") == 0))
         {
             const char *const value = strtok(NULL, " \t");
             if (value == NULL)
-                reply(client, "err usage: beeper mute 0|1 | beeper vol 0..2 | beeper [PATTERN]");
+                reply(client, "err usage: beeper mute 0|1 | beeper dim 0..2 (0 full, 2 softest) | "
+                              "beeper status | beeper [PATTERN]");
             else
                 beeper_command(client, sub, atoi(value));
         }
