@@ -113,7 +113,9 @@ disable that first.
 | `rest` / `reboot` / `power-off` | rest mode, reboot, or power off |
 | `uninstall TITLE_ID` | uninstall a title |
 | `notify TYPE MESSAGE` | an on-screen message: `toast` (banner) or `flyout` (card) |
-| `hwinfo` | model, serial, CPU temp, all 64 SoC sensors (incl. the hottest), CPU clock, fan speed %, SoC power (mW, total and per rail), system version string, SoC id, CPU mode, core count, uptime |
+| `hwinfo` | model, serial, CPU temp, all 64 SoC sensors (incl. the hottest), CPU clock (and each core's, `sceKernelGetCpuCoreClock`), fan speed %, SoC power (mW, total and per rail), system version string, SoC id, CPU mode, core count, uptime |
+| `hwdetail` | JSON (also `GET /api/hwdetail`): the ICC's boot and shutdown counts, operating time, power-up cause, firmware ("Floyd") version, error log (records stamped in seconds since 2012-01-01) and system event log, the last boot's stage timestamps, the secure clock (`/dev/srtc`), USB and disc-drive power states, the SMU's clock table, the PCIe AER and GDDR6 error-rate counters, and system facts (ICC model, AMD part number, build number, budgets). Every read is a libkernel "get"; what is not decoded is sent as hex |
+| `display` | JSON (also `GET /api/display`): the HDMI sink's raw EDID (`sceVideoOutGetHdmiRawEdid_`, port 0x7000: byte 0 is the block count) and the system's 0x144-byte monitor-info record (`sceVideoOutGetHdmiMonitorInfo_`). The dashboard decodes the EDID: name, maker, preferred mode, video modes, HDMI 2.x (TMDS/FRL, VRR, ALLM, DSC), HDR and colorimetry, audio |
 | `thermal-probe` | bring-up: the raw readings libkernel's other thermal paths give (the ICC's `/dev/icc_thermal` byte, the `machdep.aeolia.alert.thermal` sysctl, the SMU's read-only getters), uninterpreted |
 | `df` | free space per mounted volume |
 | `led BWA` / `off` / `auto` / `breathe B W A [MS]` / `chase [MS]` | the console indicator LED (static, off, system-controlled, or an animated effect), via `/dev/icc_indicator` |
@@ -140,7 +142,8 @@ byte-for-byte), `hash` (matches `sha256sum` for a 1 MB file and an empty file),
 success, including the `breathe`/`chase`/`auto` effects and beeper `mute`/`vol`),
 `scan`/`scan-aob` (hit a known probe), `kern-read`/`kern-write` and `setting-set`
 (verified), `notify`, `peek`, `http`, the UDP beacon and `klog-stream`, and the
-console-hosted dashboard with its control panel (`GET /`, `GET /api/hwinfo`, and
+console-hosted dashboard with its control panel (`GET /`, `GET /api/hwinfo`,
+`GET /api/hwdetail` and `GET /api/display` — the Hardware and Display sections — and
 `GET /api/run?c=CMD` — verified on 12.20 with `ping`, `hwinfo` and `ls`, and the
 `put`/`quit`/`klog-stream` exclusion refused with 400). `install` and `exec` are
 wired and fail gracefully on a missing target (a positive run needs a real

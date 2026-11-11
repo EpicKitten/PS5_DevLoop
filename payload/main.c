@@ -52,8 +52,12 @@
  *   uninstall TITLE_ID        uninstall a title
  *   power off|reboot|rest     power off, reboot, or enter rest mode
  *   notify TYPE MESSAGE       show a message: TYPE is toast or flyout
- *   hwinfo                    model, serial, cpu + all SoC temps, cpu clock, fan %,
- *                             SoC power
+ *   hwinfo                    model, serial, cpu + all SoC temps, cpu clock (and per
+ *                             core), fan %, SoC power
+ *   hwdetail                  JSON: the ICC's boot counts, operating time, error and
+ *                             event logs, boot-stage times, secure clock, the SMU's
+ *                             clock table, device power states, system facts
+ *   display                   JSON: the HDMI sink's raw EDID and monitor-info record
  *   thermal-probe             bring-up: the raw ICC thermal byte, the thermal
  *                             alert sysctl and the SMU's read-only getters
  *   df                        free space per mounted volume
@@ -63,6 +67,7 @@
  *   fan hold TEMP [SECS]      re-apply the threshold every SECS s (default 7); fan hold off
  *   beeper [PATTERN]|mute 0|1|vol 0..2   beep, mute, or set the beeper volume
  *   GET / , GET /api/hwinfo   a browser gets the live dashboard, hosted here
+ *   GET /api/hwdetail, /api/display   the two JSON readings above
  *   GET /api/run?c=CMD        the dashboard runs any command above; the reply
  *                             is served as text, or as the picture/file it sends
  *   kill PID                  end a process
@@ -1989,6 +1994,11 @@ typedef struct sw_version
 } sw_version_t;
 int sceKernelGetProsperoSystemSwVersion(sw_version_t *);
 #define HWINFO_POWER_WORDS 28
+// Per-core clocks: libkernel asks the SMU (/dev/mp1, ioctl 0xc00cae1e
+// {u64 core; u32 MHz}) once per core and fills eight uint32 MHz values
+// (probed on 12.20: 8 x 3200 with a game in front).
+int sceKernelGetCpuCoreClock(uint32_t *);
+#define HWINFO_CORES 8
 
 // The SoC exposes many thermal sensors, not one: sceKernelGetSocSensorTemperature
 // answers for ids 0..63 (probed on 13.60; a few succeed on 12.20). Scan them all
@@ -2017,6 +2027,8 @@ typedef struct hwinfo
     char sw[0x20];    // the system software version as the system prints it
     bool powerOk; // the SoC power call answered
     uint32_t railmW[2], railmV[2], railmA[2];
+    bool coresOk; // the per-core clock call answered
+    uint32_t coreMHz[HWINFO_CORES];
     int socIds[HWINFO_SOC_SENSORS];
     int socVals[HWINFO_SOC_SENSORS];
 } hwinfo_t;
@@ -2109,6 +2121,14 @@ static void hwinfo_read(hwinfo_t *h)
             }
         }
     }
+    {
+        uint32_t cores[HWINFO_CORES * 2] = {0}; // slack, in case a firmware reports more
+        if (sceKernelGetCpuCoreClock(cores) == 0)
+        {
+            h->coresOk = true;
+            memcpy(h->coreMHz, cores, sizeof(h->coreMHz));
+        }
+    }
 }
 
 static void hwinfo(int client)
@@ -2156,6 +2176,15 @@ static char *hwinfo_json(void)
                            h.railmA[1]);
     else
         json = text_append(json, &cap, &used, "\"power\":null,");
+    if (h.coresOk)
+    {
+        json = text_append(json, &cap, &used, "\"coreMHz\":[");
+        for (int i = 0; json != NULL && i < HWINFO_CORES; i++)
+            json = text_append(json, &cap, &used, "%s%u", i ? "," : "", h.coreMHz[i]);
+        json = text_append(json, &cap, &used, "],");
+    }
+    else
+        json = text_append(json, &cap, &used, "\"coreMHz\":null,");
     json = text_append(json, &cap, &used, "\"socSensors\":[");
     for (int i = 0; json != NULL && i < h.socN; i++)
         json = text_append(json, &cap, &used, "%s{\"id\":%d,\"c\":%d}", i ? "," : "", h.socIds[i],
@@ -2248,6 +2277,304 @@ static void thermal_probe(int client)
     }
 #undef PROBE_ADD
     reply(client, "ok thermal-probe %s", line);
+}
+
+// ===== hwdetail: the ICC's counters and logs, the SMU clock table, system facts =====
+// Slow-changing readings, served apart from hwinfo so the dashboard can fetch
+// them every few seconds instead of four times a second. Every request is one a
+// libkernel getter makes (cross-referenced on 12.20, README "Hardware calls"),
+// direction OUT or a zeroed INOUT "get": nothing is written to the hardware.
+// Values the probes could not decode are sent raw, as hex, for the page to show.
+int sceKernelGetSocClock(void *);
+#define SRTC_EPOCH 1325376000L // the ICC and srtc count seconds from 2012-01-01 UTC
+
+// Append "key":"hex" in chunks: text_append guarantees only ~1280 bytes a call.
+static char *json_hex(char *json, size_t *cap, size_t *used, const char *key, const uint8_t *b,
+                      size_t n)
+{
+    json = text_append(json, cap, used, "\"%s\":\"", key);
+    for (size_t at = 0; json != NULL && at < n; at += 256)
+    {
+        char chunk[513];
+        const size_t take = n - at < 256 ? n - at : 256;
+        for (size_t i = 0; i < take; i++)
+            snprintf(chunk + 2 * i, 3, "%02x", b[at + i]);
+        chunk[2 * take] = '\0';
+        json = text_append(json, cap, used, "%s", chunk);
+    }
+    return text_append(json, cap, used, "\",");
+}
+
+// One ioctl on a device opened for it: 0, or the errno. buf is zeroed first.
+static int dev_get(const char *dev, unsigned long cmd, void *buf, size_t size)
+{
+    memset(buf, 0, size);
+    const int fd = open(dev, O_RDWR);
+    if (fd < 0)
+        return errno;
+    const int rc = ioctl(fd, cmd, buf);
+    const int error = rc == 0 ? 0 : errno;
+    close(fd);
+    return error;
+}
+
+// A sysctl's value: its length, or -1 on failure. buf is zeroed first.
+static long sysctl_get(const char *name, void *buf, size_t size)
+{
+    memset(buf, 0, size);
+    size_t length = size;
+    if (sysctlbyname(name, buf, &length, NULL, 0) != 0)
+        return -1;
+    return (long)length;
+}
+
+// A sysctl as a JSON integer (little-endian, up to 8 bytes), or null.
+static char *json_sysctl_int(char *json, size_t *cap, size_t *used, const char *key,
+                             const char *name)
+{
+    uint8_t b[8];
+    const long n = sysctl_get(name, b, sizeof(b));
+    if (n <= 0)
+        return text_append(json, cap, used, "\"%s\":null,", key);
+    uint64_t v = 0;
+    memcpy(&v, b, (size_t)n < sizeof(v) ? (size_t)n : sizeof(v));
+    return text_append(json, cap, used, "\"%s\":%llu,", key, (unsigned long long)v);
+}
+
+// A sysctl as a JSON string (printable characters only, trailing blanks dropped).
+static char *json_sysctl_text(char *json, size_t *cap, size_t *used, const char *key,
+                              const char *name)
+{
+    char b[96];
+    const long n = sysctl_get(name, b, sizeof(b) - 1);
+    if (n <= 0)
+        return text_append(json, cap, used, "\"%s\":null,", key);
+    size_t end = 0;
+    for (size_t i = 0; i < (size_t)n && b[i] != '\0'; i++)
+        if (b[i] < 32 || b[i] > 126)
+            b[i] = '?';
+        else
+            end = b[i] == ' ' ? end : i + 1;
+    b[end] = '\0';
+    char escaped[200];
+    json_escape(escaped, sizeof(escaped), b);
+    return text_append(json, cap, used, "\"%s\":\"%s\",", key, escaped);
+}
+
+// A one-ioctl getter as a JSON integer (little-endian), or null when it fails.
+static char *json_dev_int(char *json, size_t *cap, size_t *used, const char *key,
+                          const char *dev, unsigned long cmd)
+{
+    uint8_t b[8];
+    const size_t size = (cmd >> 16) & 0x1fff;
+    if (size > sizeof(b) || dev_get(dev, cmd, b, sizeof(b)) != 0)
+        return text_append(json, cap, used, "\"%s\":null,", key);
+    uint64_t v = 0;
+    memcpy(&v, b, size);
+    return text_append(json, cap, used, "\"%s\":%llu,", key, (unsigned long long)v);
+}
+
+static char *hwdetail_json(void)
+{
+    ensure_elevated();
+    size_t cap = 1u << 14, used = 0;
+    char *json = malloc(cap);
+    json = text_append(json, &cap, &used, "{\"ok\":true,");
+
+    // icc_power: boot/shutdown counts, operating time, power-up cause
+    {
+        uint32_t counts[3];
+        if (dev_get("/dev/icc_power", 0xc00c9904ul, counts, sizeof(counts)) == 0)
+            json = text_append(json, &cap, &used, "\"boots\":%u,\"shutdowns\":%u,", counts[1],
+                               counts[2]);
+        else
+            json = text_append(json, &cap, &used, "\"boots\":null,\"shutdowns\":null,");
+        uint64_t optime[2];
+        // u64 [1] counts the operating time; it did not move over 140 s on 12.20, so it
+        // is likely saved at shutdown (unit unconfirmed: seconds fits 150 boots)
+        if (dev_get("/dev/icc_power", 0xc0109905ul, optime, sizeof(optime)) == 0)
+            json = text_append(json, &cap, &used, "\"opTime\":%llu,",
+                               (unsigned long long)optime[1]);
+        else
+            json = text_append(json, &cap, &used, "\"opTime\":null,");
+        uint8_t cause[9];
+        if (dev_get("/dev/icc_power", 0xc0099902ul, cause, sizeof(cause)) == 0)
+            json = json_hex(json, &cap, &used, "upCause", cause, sizeof(cause));
+        json = json_dev_int(json, &cap, &used, "upCause2", "/dev/icc_power", 0x40019907ul);
+        json = json_dev_int(json, &cap, &used, "bootReqCount", "/dev/icc_power", 0x4004990bul);
+    }
+
+    // icc_floyd version, icc_configuration and icc_device_power states, other ICC bytes
+    {
+        uint8_t floyd[14];
+        if (dev_get("/dev/icc_floyd", 0x400eb701ul, floyd, sizeof(floyd)) == 0)
+            json = json_hex(json, &cap, &used, "floyd", floyd, sizeof(floyd));
+        json = json_dev_int(json, &cap, &used, "cpuInfoBit", "/dev/icc_configuration", 0xc0029203ul);
+        json = json_dev_int(json, &cap, &used, "bdChucking", "/dev/icc_configuration", 0x40019209ul);
+        json = json_dev_int(json, &cap, &used, "emcBt", "/dev/icc_configuration", 0x40019213ul);
+        json = json_dev_int(json, &cap, &used, "usbPower", "/dev/icc_device_power", 0x40019c04ul);
+        json = json_dev_int(json, &cap, &used, "bdPower", "/dev/icc_device_power", 0x40019c08ul);
+        json = json_dev_int(json, &cap, &used, "iccHdmi", "/dev/icc_hdmi", 0x4001c301ul);
+        json = json_dev_int(json, &cap, &used, "iccCrash", "/dev/icc_crash_report", 0x4001c101ul);
+        json = json_dev_int(json, &cap, &used, "bd401", "/dev/icc_bddrive", 0x4002c401ul);
+        json = json_dev_int(json, &cap, &used, "bd402", "/dev/icc_bddrive", 0x4004c402ul);
+        json = json_dev_int(json, &cap, &used, "bd404", "/dev/icc_bddrive", 0x4001c404ul);
+        json = json_dev_int(json, &cap, &used, "iccThermal", "/dev/icc_thermal", 0x40019003ul);
+    }
+
+    // the last boot's stage timestamps (96 u32, zero where a stage did not run)
+    {
+        uint32_t stamps[96];
+        if (dev_get("/dev/icc_configuration", 0x4180920eul, stamps, sizeof(stamps)) == 0)
+        {
+            json = text_append(json, &cap, &used, "\"bootTimes\":[");
+            for (int i = 0; json != NULL && i < 96; i++)
+                json = text_append(json, &cap, &used, "%s%u", i ? "," : "", stamps[i]);
+            json = text_append(json, &cap, &used, "],");
+        }
+        else
+            json = text_append(json, &cap, &used, "\"bootTimes\":null,");
+    }
+
+    // the secure RTC: seconds from 2012, sent as unix seconds
+    {
+        uint32_t rtc[4];
+        if (dev_get("/dev/srtc", 0x40105305ul, rtc, sizeof(rtc)) == 0 && rtc[0] != 0)
+            json = text_append(json, &cap, &used, "\"srtc\":%ld,", SRTC_EPOCH + (long)rtc[0]);
+        else
+            json = text_append(json, &cap, &used, "\"srtc\":null,");
+    }
+
+    // the SMU's clock table (27 words, MHz; the GPU's max 2230 is among them)
+    {
+        uint32_t clocks[32];
+        memset(clocks, 0, sizeof(clocks));
+        if (sceKernelGetSocClock(clocks) == 0)
+        {
+            json = text_append(json, &cap, &used, "\"socClock\":[");
+            for (int i = 0; json != NULL && i < 27; i++)
+                json = text_append(json, &cap, &used, "%s%u", i ? "," : "", clocks[i]);
+            json = text_append(json, &cap, &used, "],");
+        }
+        else
+            json = text_append(json, &cap, &used, "\"socClock\":null,");
+    }
+
+    // ICC logs: the error log (63 x 32-byte records after a 4-byte header), the
+    // system event log, and the counters behind boots and operating time
+    {
+        uint8_t *const log = malloc(4096);
+        if (log != NULL)
+        {
+            long n = sysctl_get("machdep.icc.err_log", log, 4096);
+            if (n > 0)
+                json = json_hex(json, &cap, &used, "errLog", log, (size_t)n);
+            n = sysctl_get("machdep.icc.sys_event_log", log, 4096);
+            if (n > 0)
+                json = json_hex(json, &cap, &used, "sysEventLog", log, (size_t)n);
+            n = sysctl_get("machdep.icc.count_time", log, 4096);
+            if (n > 0)
+                json = json_hex(json, &cap, &used, "countTime", log, (size_t)n);
+            n = sysctl_get("hw.pcist.get_pci_aer", log, 4096);
+            if (n > 0)
+                json = json_hex(json, &cap, &used, "pciAer", log, (size_t)n);
+            n = sysctl_get("hw.umc.get_erate_in_game", log, 4096);
+            if (n > 0)
+                json = json_hex(json, &cap, &used, "umcErate", log, (size_t)n);
+            free(log);
+        }
+    }
+
+    // system facts
+    json = json_sysctl_text(json, &cap, &used, "hwModel", "machdep.icc.hw_model");
+    json = json_sysctl_text(json, &cap, &used, "processor", "kern.processor_name_id");
+    json = json_sysctl_int(json, &cap, &used, "productShape", "hw.config.product_shape");
+    json = json_sysctl_int(json, &cap, &used, "specialModel", "hw.config.special_model_flag");
+    json = json_sysctl_int(json, &cap, &used, "ecoCharge", "hw.config.is_ecocharge_available");
+    json = json_sysctl_int(json, &cap, &used, "hddssd", "hw.config.hddssd");
+    json = json_sysctl_int(json, &cap, &used, "subsysId", "hw.sce_subsys_subid");
+    json = json_sysctl_int(json, &cap, &used, "bdDrive", "hw.config.bd_drive");
+    json = json_sysctl_int(json, &cap, &used, "opticalOut", "hw.config.optical_out");
+    json = json_sysctl_int(json, &cap, &used, "m2Attached", "hw.m2_device_attached");
+    json = json_sysctl_int(json, &cap, &used, "thermalAlert", "machdep.aeolia.alert.thermal");
+    json = json_sysctl_int(json, &cap, &used, "tscHz", "machdep.tsc_freq");
+    json = json_sysctl_int(json, &cap, &used, "buildnum", "kern.buildnum");
+    json = json_sysctl_int(json, &cap, &used, "neomode", "kern.neomode");
+    json = json_sysctl_int(json, &cap, &used, "cpumodeGame", "kern.cpumode_game");
+    json = json_sysctl_int(json, &cap, &used, "resumeType", "kern.system_suspend.last_resume_type");
+    json = json_sysctl_int(json, &cap, &used, "availPages", "hw.availpages");
+    json = json_sysctl_int(json, &cap, &used, "mlockAvail", "vm.budgets.mlock_avail");
+    json = json_sysctl_int(json, &cap, &used, "mlockTotal", "vm.budgets.mlock_total");
+    json = json_sysctl_int(json, &cap, &used, "kernHeap", "vm.kern_heap_size");
+    return text_append(json, &cap, &used, "\"now\":%ld}", (long)time(NULL));
+}
+
+// ===== display: the HDMI sink's EDID and the system's monitor-info record =====
+// libSceVideoOut is dlopened (the payload links no video library). Both calls
+// take the HDMI port id 0x7000 that libSceVideoOut itself passes, so they need
+// no video-out handle (sceVideoOutOpen answers 0x80290009, busy: the compositor
+// owns the port). Probed on 12.20:
+//   sceVideoOutGetHdmiRawEdid_(buf, 0x201)  byte 0 = the number of 128-byte
+//                                           blocks, then the EDID (up to 4 blocks)
+//   sceVideoOutGetHdmiMonitorInfo_(0x7000, buf)  a 0x144-byte record (maker,
+//                                           product, name, capabilities); the
+//                                           library clears it to 0x180
+static char *display_json(void)
+{
+    ensure_elevated();
+    static int (*raw_edid)(void *, size_t);
+    static int (*monitor_info)(long, void *);
+    static bool resolved;
+    if (!resolved)
+    {
+        resolved = true;
+        void *const video = dlopen("libSceVideoOut.sprx", RTLD_NOW | RTLD_GLOBAL);
+        if (video != NULL)
+        {
+            raw_edid = (int (*)(void *, size_t))dlsym(video, "sceVideoOutGetHdmiRawEdid_");
+            monitor_info = (int (*)(long, void *))dlsym(video, "sceVideoOutGetHdmiMonitorInfo_");
+        }
+    }
+    size_t cap = 1u << 13, used = 0;
+    char *json = malloc(cap);
+    json = text_append(json, &cap, &used, "{\"ok\":true,");
+    uint8_t *const buf = calloc(1, 0x400);
+    if (buf == NULL)
+    {
+        free(json);
+        return NULL;
+    }
+    if (raw_edid == NULL)
+        json = text_append(json, &cap, &used, "\"edidRc\":null,");
+    else
+    {
+        const int rc = raw_edid(buf, 0x201);
+        json = text_append(json, &cap, &used, "\"edidRc\":\"0x%08x\",", (uint32_t)rc);
+        if (rc == 0)
+            json = json_hex(json, &cap, &used, "edid", buf, 0x201);
+    }
+    memset(buf, 0, 0x400);
+    if (monitor_info == NULL)
+        json = text_append(json, &cap, &used, "\"monitorRc\":null,");
+    else
+    {
+        const int rc = monitor_info(0x7000, buf);
+        json = text_append(json, &cap, &used, "\"monitorRc\":\"0x%08x\",", (uint32_t)rc);
+        if (rc == 0)
+            json = json_hex(json, &cap, &used, "monitor", buf, 0x144);
+    }
+    free(buf);
+    return text_append(json, &cap, &used, "\"port\":\"0x7000\"}");
+}
+
+// The text-port form of hwdetail and display: the JSON, as a file.
+static void send_json(int client, const char *name, char *json)
+{
+    if (json == NULL)
+        reply(client, "err %s: out of memory", name);
+    else
+        send_bytes(client, name, json, strlen(json));
+    free(json);
 }
 
 // ===== Console hardware: indicator LED, fan and beeper (ICC) =====
@@ -3100,9 +3427,12 @@ static void http_serve_page(int client, const char *verb, const char *url)
                   head_only);
         return;
     }
-    if (strcmp(url, "/api/hwinfo") == 0)
+    if (strcmp(url, "/api/hwinfo") == 0 || strcmp(url, "/api/hwdetail") == 0 ||
+        strcmp(url, "/api/display") == 0)
     {
-        char *const json = hwinfo_json();
+        char *const json = strcmp(url, "/api/hwinfo") == 0     ? hwinfo_json()
+                           : strcmp(url, "/api/hwdetail") == 0 ? hwdetail_json()
+                                                               : display_json();
         if (json == NULL)
             http_send(client, "500 Internal Server Error", "text/plain", "oom", 3, head_only);
         else
@@ -3456,6 +3786,16 @@ static int handle_command(int client, char *line, const char *body, size_t body_
     if (strcmp(command, "hwinfo") == 0)
     {
         hwinfo(client);
+        return 0;
+    }
+    if (strcmp(command, "hwdetail") == 0)
+    {
+        send_json(client, "hwdetail.json", hwdetail_json());
+        return 0;
+    }
+    if (strcmp(command, "display") == 0)
+    {
+        send_json(client, "display.json", display_json());
         return 0;
     }
     if (strcmp(command, "thermal-probe") == 0)

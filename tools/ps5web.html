@@ -179,6 +179,35 @@
   .gitem .gmeta { color: var(--muted); flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .gitem button { padding: 3px 10px; font-size: 12px; }
   .outhead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
+  /* per-core clocks under the CPU clock */
+  .cores { display: grid; grid-template-columns: repeat(8, 1fr); gap: 3px; width: 100%; max-width: 200px; margin-top: 10px; }
+  .cores:empty { display: none; }
+  .core { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 10px; color: var(--muted);
+    font-variant-numeric: tabular-nums; }
+  .core i { display: block; width: 100%; height: 26px; background: #1a2436; border-radius: 3px; position: relative; overflow: hidden; }
+  .core i::after { content: ""; position: absolute; left: 0; right: 0; bottom: 0; height: var(--h, 0%); background: #b48cff; }
+  /* hardware and display sections: key/value lists */
+  .kv { display: grid; grid-template-columns: auto 1fr; gap: 4px 14px; font-size: 13px; margin: 0; }
+  .kv dt { color: var(--muted); }
+  .kv dd { margin: 0; font-variant-numeric: tabular-nums; word-break: break-word; }
+  .kv dd small { color: var(--muted); }
+  .note { color: var(--muted); font-size: 11px; }
+  .tag { display: inline-block; padding: 1px 7px; margin: 0 4px 4px 0; border: 1px solid var(--line); border-radius: 6px;
+    background: #0d1420; font-size: 12px; font-variant-numeric: tabular-nums; }
+  .tag.on { border-color: var(--cool); color: var(--cool); }
+  .tag.off { color: var(--muted); }
+  .tag.native { border-color: var(--accent); }
+  .hexdump { font: 11px/1.45 ui-monospace, "SF Mono", Menlo, Consolas, monospace; color: #9fb3cf; background: #080c14;
+    border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; margin: 6px 0 0; white-space: pre; overflow: auto; max-height: 260px; }
+  details summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-top: 8px; }
+  table.log { width: 100%; border-collapse: collapse; font-size: 12px; font-variant-numeric: tabular-nums; }
+  table.log th { text-align: left; color: var(--muted); font-weight: 500; padding: 3px 6px; border-bottom: 1px solid var(--line); }
+  table.log td { padding: 3px 6px; border-bottom: 1px solid #1a2436; white-space: nowrap; }
+  table.log td.raw { font-family: ui-monospace, Menlo, Consolas, monospace; font-size: 11px; color: #9fb3cf; white-space: normal; word-break: break-all; }
+  .scroll { overflow-x: auto; }
+  .stages { position: relative; height: 34px; margin: 6px 0 2px; border-bottom: 1px solid var(--line); }
+  .stages i { position: absolute; bottom: 0; width: 2px; height: 22px; background: var(--accent); border-radius: 1px; }
+  .stages-axis { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; }
 </style>
 <style>.uplot, .uplot *, .uplot *::before, .uplot *::after {box-sizing: border-box;}.uplot {font-family: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, "Noto Sans", sans-serif, "Apple Color Emoji", "Segoe UI Emoji", "Segoe UI Symbol", "Noto Color Emoji";line-height: 1.5;width: min-content;}.u-title {text-align: center;font-size: 18px;font-weight: bold;}.u-wrap {position: relative;user-select: none;}.u-over, .u-under {position: absolute;}.u-under {overflow: hidden;}.uplot canvas {display: block;position: relative;width: 100%;height: 100%;}.u-axis {position: absolute;}.u-legend {font-size: 14px;margin: auto;text-align: center;}.u-inline {display: block;}.u-inline * {display: inline-block;}.u-inline tr {margin-right: 16px;}.u-legend th {font-weight: 600;}.u-legend th > * {vertical-align: middle;display: inline-block;}.u-legend .u-marker {width: 1em;height: 1em;margin-right: 4px;background-clip: padding-box !important;}.u-inline.u-live th::after {content: ":";vertical-align: middle;}.u-inline:not(.u-live) .u-value {display: none;}.u-series > * {padding: 4px;}.u-series th {cursor: pointer;}.u-legend .u-off > * {opacity: 0.3;}.u-select {background: rgba(0,0,0,0.07);position: absolute;pointer-events: none;}.u-cursor-x, .u-cursor-y {position: absolute;left: 0;top: 0;pointer-events: none;will-change: transform;}.u-hz .u-cursor-x, .u-vt .u-cursor-y {height: 100%;border-right: 1px dashed #607D8B;}.u-hz .u-cursor-y, .u-vt .u-cursor-x {width: 100%;border-bottom: 1px dashed #607D8B;}.u-cursor-pt {position: absolute;top: 0;left: 0;border-radius: 50%;border: 0 solid;pointer-events: none;will-change: transform;/*this has to be !important since we set inline "background" shorthand */background-clip: padding-box !important;}.u-axis.u-off, .u-select.u-off, .u-cursor-x.u-off, .u-cursor-y.u-off, .u-cursor-pt.u-off {display: none;}</style>
 </head>
@@ -232,6 +261,7 @@
       <div class="label">CPU clock</div>
       <div class="big" id="mhz">—</div>
       <div class="unit">MHz</div>
+      <div class="cores" id="cores-mhz" title="Per-core clock (SMU)"></div>
     </div>
     <div class="card">
       <div class="label">Fan speed</div>
@@ -310,6 +340,73 @@
     </div>
     <div class="uchart" id="powerchart"></div>
   </div>
+  </div>
+
+  <!-- ================= hardware (GET /api/hwdetail) ================= -->
+  <h2 class="section">Hardware <button class="mini" id="hw-refresh" title="Read again">Refresh</button>
+    <span class="note" id="hw-when" style="text-transform:none;letter-spacing:0;font-weight:400"></span></h2>
+  <div class="panel">
+    <div class="pcard">
+      <h3>Power history <small>ICC counters</small></h3>
+      <dl class="kv" id="hw-power"><dt>—</dt><dd></dd></dl>
+    </div>
+    <div class="pcard">
+      <h3>Identity <small>model, SoC, firmware</small></h3>
+      <dl class="kv" id="hw-ident"><dt>—</dt><dd></dd></dl>
+    </div>
+    <div class="pcard">
+      <h3>Devices <small>power states and fitted parts</small></h3>
+      <dl class="kv" id="hw-devices"><dt>—</dt><dd></dd></dl>
+    </div>
+    <div class="pcard">
+      <h3>Memory and buses <small>budgets, error counters</small></h3>
+      <dl class="kv" id="hw-memory"><dt>—</dt><dd></dd></dl>
+    </div>
+    <div class="pcard wide">
+      <h3>SoC clock table <small>SMU, MHz; field names not known</small></h3>
+      <div id="hw-clocks"><span class="note">—</span></div>
+    </div>
+    <div class="pcard wide">
+      <h3>Last boot <small>ICC stage timestamps</small></h3>
+      <div id="hw-boot"><span class="note">—</span></div>
+    </div>
+    <div class="pcard wide">
+      <h3>ICC error log <small>newest first; codes not decoded</small></h3>
+      <div class="scroll" id="hw-errlog"><span class="note">—</span></div>
+      <details><summary>System event log, raw counters</summary><div id="hw-raw"></div></details>
+    </div>
+  </div>
+
+  <!-- ================= display (GET /api/display) ================= -->
+  <h2 class="section">Display <button class="mini" id="dp-refresh" title="Read the EDID again">Refresh</button></h2>
+  <div class="panel">
+    <div class="pcard">
+      <h3>Sink <small>from the EDID</small></h3>
+      <dl class="kv" id="dp-sink"><dt>—</dt><dd></dd></dl>
+    </div>
+    <div class="pcard">
+      <h3>HDMI capabilities <small>CTA-861 extension</small></h3>
+      <dl class="kv" id="dp-hdmi"><dt>—</dt><dd></dd></dl>
+    </div>
+    <div class="pcard wide">
+      <h3>Video modes <small>blue = native</small></h3>
+      <div id="dp-modes"><span class="note">—</span></div>
+    </div>
+    <div class="pcard">
+      <h3>HDR and colour</h3>
+      <dl class="kv" id="dp-hdr"><dt>—</dt><dd></dd></dl>
+    </div>
+    <div class="pcard">
+      <h3>Audio</h3>
+      <div id="dp-audio"><span class="note">—</span></div>
+    </div>
+    <div class="pcard wide">
+      <h3>Raw <small>EDID and the system's monitor-info record</small></h3>
+      <div class="row" style="margin-top:0"><button class="mini" id="dp-save">Save EDID (.bin)</button>
+        <span class="note" id="dp-rc"></span></div>
+      <details><summary>EDID hex</summary><pre class="hexdump" id="dp-edid-hex"></pre></details>
+      <details><summary>Monitor-info record hex (0x144 bytes)</summary><pre class="hexdump" id="dp-mon-hex"></pre></details>
+    </div>
   </div>
 
   <!-- ================= control panel ================= -->
@@ -1019,6 +1116,7 @@ async function poll() {
     serial = d.serial || "";
     showSerial();
     document.getElementById("mhz").textContent = d.cpuMHz == null ? "—" : d.cpuMHz;
+    renderCores(d.coreMHz);
     const socMax = d.socMax != null ? d.socMax : d.socC;
     document.getElementById("soc-sub").textContent =
       d.socMaxId != null && d.socMaxId >= 0 ? "#" + d.socMaxId : "";
@@ -1496,6 +1594,431 @@ function getFile() {
 }
 
 document.getElementById("clear").onclick = () => { out.textContent = ""; out.dataset.virgin = "1"; };
+
+// ---- per-core clocks (hwinfo's coreMHz: the SMU's clock for each of the 8 cores) ----
+let coreScale = 3500;
+function renderCores(list) {
+  const box = document.getElementById("cores-mhz");
+  if (!Array.isArray(list) || !list.length) { box.innerHTML = ""; return; }
+  coreScale = Math.max(coreScale, ...list);
+  box.innerHTML = list.map((v, i) =>
+    `<span class="core" title="core ${i}: ${v} MHz"><i style="--h:${Math.round(100 * v / coreScale)}%"></i>${i}</span>`).join("");
+  box.title = "Per-core clock (SMU): " + list.join(" · ") + " MHz";
+}
+
+// ---- shared helpers for the hardware and display sections ----
+const SRTC_EPOCH = 1325376000; // the ICC counts seconds from 2012-01-01 UTC
+const hexBytes = h => {
+  const a = new Uint8Array((h || "").length >> 1);
+  for (let i = 0; i < a.length; i++) a[i] = parseInt(h.substr(i * 2, 2), 16);
+  return a;
+};
+const u32 = (b, o) => (b[o] | b[o + 1] << 8 | b[o + 2] << 16 | b[o + 3] << 24) >>> 0;
+const hx = (v, w) => v == null ? "—" : "0x" + (Number(v) >>> 0).toString(16).padStart(w || 0, "0");
+const txt = v => v == null || v === "" ? "—" : esc(String(v));
+const flag = (v, on, off) => v == null ? "—"
+  : v ? `<span class="tag on">${on || "yes"}</span>` : `<span class="tag off">${off || "no"}</span>`;
+const mib = v => v == null ? "—" : (v / 1048576).toFixed(v >= 1073741824 ? 0 : 1) + " MiB";
+const when = unix => unix ? new Date(unix * 1000).toLocaleString() : "—";
+function kv(id, rows) {
+  const html = rows.filter(Boolean).map(([k, v, title]) =>
+    `<dt>${esc(k)}</dt><dd${title ? ` title="${esc(title)}"` : ""}>${v}</dd>`).join("");
+  document.getElementById(id).innerHTML = html || "<dt>—</dt><dd></dd>";
+}
+function hexdump(b) {
+  const lines = [];
+  for (let o = 0; o < b.length; o += 16) {
+    const row = Array.from(b.slice(o, o + 16), x => x.toString(16).padStart(2, "0")).join(" ");
+    const asc = Array.from(b.slice(o, o + 16), x => x >= 32 && x < 127 ? String.fromCharCode(x) : ".").join("");
+    lines.push(o.toString(16).padStart(4, "0") + "  " + row.padEnd(48) + "  " + asc);
+  }
+  return lines.join("\n");
+}
+const rawBlock = (title, h) => h ? `<div class="note" style="margin-top:8px">${esc(title)}</div><pre class="hexdump">${esc(hexdump(hexBytes(h)))}</pre>` : "";
+
+// ---- hardware: GET /api/hwdetail (ICC counters and logs, SMU clocks, system facts) ----
+function renderHardware(d) {
+  const open = d.boots != null && d.shutdowns != null ? d.boots - d.shutdowns : null;
+  const drift = d.srtc && d.now ? d.srtc - d.now : null;
+  kv("hw-power", [
+    ["Boots", txt(d.boots)],
+    ["Shutdowns", txt(d.shutdowns)],
+    open != null && ["Boots without a shutdown", txt(open) + ` <small>(the running session is one)</small>`],
+    ["Operating time", d.opTime == null ? "—" : `${fmtUptime(d.opTime)} <small>if seconds (raw ${d.opTime}); saved at shutdown</small>`],
+    ["Power-up cause", d.upCause ? `<code>${esc(d.upCause.match(/../g).join(" "))}</code> <small>undecoded</small>` : "—",
+      "icc_power 0xc0099902 (9 bytes) and 0x40019907 = " + d.upCause2],
+    ["Boot requests", txt(d.bootReqCount)],
+    ["Secure clock", d.srtc ? `${when(d.srtc)}` + (drift != null ? ` <small>(${drift >= 0 ? "+" : ""}${drift} s vs system)</small>` : "") : "—",
+      "/dev/srtc, seconds since 2012-01-01"],
+  ]);
+  const floyd = d.floyd ? d.floyd.match(/../g).join(" ") : null;
+  kv("hw-ident", [
+    ["ICC model", txt(d.hwModel)],
+    ["Processor", txt(d.processor), "kern.processor_name_id (AMD part number)"],
+    ["ICC firmware", floyd ? `<code>${esc(floyd)}</code>` : "—", "icc_floyd 0x400eb701, 14 bytes"],
+    ["Kernel build", d.buildnum == null ? "—" : `${d.buildnum} <small>${hx(d.buildnum)}</small>`],
+    ["Subsystem id", hx(d.subsysId, 8)],
+    ["Product shape", txt(d.productShape), "hw.config.product_shape"],
+    ["Special model", txt(d.specialModel)],
+    ["TSC", d.tscHz ? (d.tscHz / 1e6).toFixed(3) + " MHz" : "—"],
+    ["Neo mode", txt(d.neomode)],
+    ["Game CPU mode", txt(d.cpumodeGame)],
+    ["Last resume type", txt(d.resumeType)],
+  ]);
+  kv("hw-devices", [
+    ["USB power", flag(d.usbPower, "on", "off")],
+    ["Disc drive fitted", flag(d.bdDrive)],
+    ["Disc drive power", flag(d.bdPower, "on", "off")],
+    ["Disc chucking", txt(d.bdChucking), "icc_configuration 0x40019209"],
+    ["Disc drive regs", [d.bd401, d.bd402, d.bd404].map(v => hx(v)).join(" · "), "icc_bddrive c401 (2 B) · c402 (4 B) · c404 (1 B), undecoded"],
+    ["M.2 SSD", flag(d.m2Attached, "fitted", "empty")],
+    ["Optical audio out", flag(d.opticalOut)],
+    ["HDD/SSD flag", txt(d.hddssd)],
+    ["Eco charge", flag(d.ecoCharge, "available", "no")],
+    ["ICC thermal byte", d.iccThermal == null ? "—" : `${d.iccThermal} <small>constant under load: likely intake °C</small>`],
+    ["Thermal alert", flag(d.thermalAlert, "ALERT", "none")],
+    ["ICC HDMI · crash", `${txt(d.iccHdmi)} · ${txt(d.iccCrash)}`, "icc_hdmi 0x4001c301 · icc_crash_report 0x4001c101"],
+    ["CPU info bit · EMC BT", `${hx(d.cpuInfoBit)} · ${hx(d.emcBt)}`],
+  ]);
+  const aer = d.pciAer ? hexBytes(d.pciAer) : null;
+  const aerWords = aer ? Array.from({ length: aer.length >> 2 }, (_, i) => u32(aer, i * 4)) : null;
+  const umc = d.umcErate ? hexBytes(d.umcErate) : null;
+  const umcNonZero = umc ? umc.reduce((n, x) => n + (x ? 1 : 0), 0) : null;
+  kv("hw-memory", [
+    ["Kernel heap", d.kernHeap == null ? "—" : `${d.kernHeap} <small>vm.kern_heap_size; unit not known (KiB fits)</small>`],
+    ["mlock budget", d.mlockTotal == null ? "—" : `${mib(d.mlockAvail)} free of ${mib(d.mlockTotal)}`],
+    ["Available pages", txt(d.availPages)],
+    ["PCIe AER", aerWords ? `${aerWords[0]} <small>first word; others ${aerWords.slice(1).some(Boolean) ? aerWords.slice(1).join(",") : "zero"}</small>` : "—",
+      "hw.pcist.get_pci_aer (" + (aer ? aer.length : 0) + " bytes); likely an error count"],
+    ["GDDR6 error rate", umc ? (umcNonZero ? `<span class="tag on" style="border-color:var(--warm);color:var(--warm)">${umcNonZero} non-zero bytes</span>` : `<span class="tag on">all zero</span>`) : "—",
+      "hw.umc.get_erate_in_game (" + (umc ? umc.length : 0) + " bytes)"],
+  ]);
+  const clocks = document.getElementById("hw-clocks");
+  clocks.innerHTML = Array.isArray(d.socClock)
+    ? d.socClock.map((v, i) => `<span class="tag${v === 2230 ? " on" : ""}" title="word ${i}${v === 2230 ? " (the GPU's max clock)" : ""}">#${i} <b>${v}</b></span>`).join("")
+    : '<span class="note">unavailable</span>';
+  renderBoot(d.bootTimes);
+  renderErrLog(d.errLog);
+  document.getElementById("hw-raw").innerHTML =
+    rawBlock("machdep.icc.sys_event_log", d.sysEventLog) + rawBlock("machdep.icc.count_time", d.countTime) +
+    rawBlock("hw.pcist.get_pci_aer", d.pciAer) + rawBlock("hw.umc.get_erate_in_game", d.umcErate);
+}
+
+function renderBoot(list) {
+  const box = document.getElementById("hw-boot");
+  if (!Array.isArray(list)) { box.innerHTML = '<span class="note">unavailable</span>'; return; }
+  const stages = list.map((v, i) => ({ i, v })).filter(s => s.v);
+  if (!stages.length) { box.innerHTML = '<span class="note">no stages recorded</span>'; return; }
+  const max = Math.max(...stages.map(s => s.v));
+  box.innerHTML =
+    `<div class="stages">${stages.map(s => `<i style="left:${(100 * s.v / max).toFixed(2)}%" title="stage ${s.i}: ${s.v}"></i>`).join("")}</div>` +
+    `<div class="stages-axis"><span>0</span><span>${stages.length} stages · last at ${max} <small>(likely ms: ${(max / 1000).toFixed(1)} s)</small></span></div>` +
+    `<details><summary>Every stage</summary><div style="margin-top:6px">${stages.map(s => `<span class="tag">#${s.i} <b>${s.v}</b></span>`).join("")}</div></details>`;
+}
+
+// machdep.icc.err_log: a 4-byte header, then 32-byte records { u32 code; u32
+// seconds since 2012; 6 more words }. Empty records are zero.
+function renderErrLog(h) {
+  const box = document.getElementById("hw-errlog");
+  if (!h) { box.innerHTML = '<span class="note">unavailable</span>'; return; }
+  const b = hexBytes(h);
+  const rows = [];
+  for (let o = 4; o + 32 <= b.length; o += 32) {
+    const rec = b.slice(o, o + 32);
+    if (!rec.some(Boolean)) continue;
+    const words = Array.from({ length: 8 }, (_, i) => u32(rec, i * 4));
+    rows.push({ slot: (o - 4) / 32, code: words[0], t: words[1], rest: words.slice(2) });
+  }
+  rows.sort((a, c) => c.t - a.t);
+  box.innerHTML = rows.length
+    ? `<div class="note">${rows.length} record${rows.length === 1 ? "" : "s"} · header ${esc(h.slice(0, 8))}</div>` +
+      `<table class="log"><tr><th>When</th><th>Code</th><th>Slot</th><th>Words 2–7</th></tr>` +
+      rows.map(r => `<tr><td>${when(r.t + SRTC_EPOCH)}</td><td><code>${hx(r.code, 8)}</code></td><td>${r.slot}</td>` +
+        `<td class="raw">${r.rest.map(w => w.toString(16).padStart(8, "0")).join(" ")}</td></tr>`).join("") + `</table>`
+    : '<span class="note">empty</span>';
+}
+
+let hwBusy = false;
+async function loadHardware() {
+  if (hwBusy) return;
+  hwBusy = true;
+  try {
+    const r = await fetch("/api/hwdetail", { cache: "no-store" });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || "error");
+    renderHardware(d);
+    document.getElementById("hw-when").textContent = "read " + new Date().toLocaleTimeString();
+  } catch (e) {
+    document.getElementById("hw-when").textContent = "unavailable (" + e.message + "); an older payload has no /api/hwdetail";
+  } finally {
+    hwBusy = false;
+  }
+}
+document.getElementById("hw-refresh").onclick = loadHardware;
+
+// ---- display: GET /api/display (the HDMI sink's EDID, decoded here) ----
+const VIC = (() => {
+  const t = [];
+  const put = (start, list) => list.forEach((v, i) => { t[start + i] = v; });
+  const rates = (res, list, suffix) => list.map(r => res + "p" + r + (suffix || ""));
+  put(1, ["640x480p60", "720x480p60 4:3", "720x480p60", "1280x720p60", "1920x1080i60", "720x480i60 4:3", "720x480i60",
+    "720x240p60 4:3", "720x240p60", "2880x480i60 4:3", "2880x480i60", "2880x240p60 4:3", "2880x240p60", "1440x480p60 4:3",
+    "1440x480p60", "1920x1080p60", "720x576p50 4:3", "720x576p50", "1280x720p50", "1920x1080i50", "720x576i50 4:3",
+    "720x576i50", "720x288p50 4:3", "720x288p50", "2880x576i50 4:3", "2880x576i50", "2880x288p50 4:3", "2880x288p50",
+    "1440x576p50 4:3", "1440x576p50", "1920x1080p50", "1920x1080p24", "1920x1080p25", "1920x1080p30", "2880x480p60 4:3",
+    "2880x480p60", "2880x576p50 4:3", "2880x576p50", "1920x1080i50 (1250)", "1920x1080i100", "1280x720p100",
+    "720x576p100 4:3", "720x576p100", "720x576i100 4:3", "720x576i100", "1920x1080i120", "1280x720p120", "720x480p120 4:3",
+    "720x480p120", "720x480i120 4:3", "720x480i120", "720x576p200 4:3", "720x576p200", "720x576i200 4:3", "720x576i200",
+    "720x480p240 4:3", "720x480p240", "720x480i240 4:3", "720x480i240", "1280x720p24", "1280x720p25", "1280x720p30",
+    "1920x1080p120", "1920x1080p100"]);
+  put(65, rates("1280x720", [24, 25, 30, 50, 60, 100, 120], " 64:27"));
+  put(72, rates("1920x1080", [24, 25, 30, 50, 60, 100, 120], " 64:27"));
+  put(79, rates("1680x720", [24, 25, 30, 50, 60, 100, 120]));
+  put(86, rates("2560x1080", [24, 25, 30, 50, 60, 100, 120]));
+  put(93, rates("3840x2160", [24, 25, 30, 50, 60]));
+  put(98, rates("4096x2160", [24, 25, 30, 50, 60]));
+  put(103, rates("3840x2160", [24, 25, 30, 50, 60], " 64:27"));
+  put(108, ["1280x720p48", "1280x720p48 64:27", "1680x720p48", "1920x1080p48", "1920x1080p48 64:27", "2560x1080p48",
+    "3840x2160p48", "4096x2160p48", "3840x2160p48 64:27", "3840x2160p100", "3840x2160p120", "3840x2160p100 64:27",
+    "3840x2160p120 64:27"]);
+  put(121, rates("5120x2160", [24, 25, 30, 48, 50, 60, 100]));
+  put(193, ["5120x2160p120"]);
+  put(194, rates("7680x4320", [24, 25, 30, 48, 50, 60, 100, 120]));
+  put(202, rates("7680x4320", [24, 25, 30, 48, 50, 60, 100, 120], " 64:27"));
+  put(210, rates("10240x4320", [24, 25, 30, 48, 50, 60, 100, 120]));
+  put(218, ["4096x2160p100", "4096x2160p120"]);
+  return t;
+})();
+const AUDIO_FMT = ["?", "LPCM", "AC-3", "MPEG-1", "MP3", "MPEG-2", "AAC LC", "DTS", "ATRAC", "DSD", "E-AC-3 (DD+)",
+  "DTS-HD", "MAT (TrueHD/Atmos)", "DST", "WMA Pro", "extended"];
+const AUDIO_RATES = [32, 44.1, 48, 88.2, 96, 176.4, 192];
+const SPEAKERS = ["FL/FR", "LFE", "FC", "BL/BR", "BC", "FLC/FRC", "RLC/RRC", "FLW/FRW"];
+const FRL = ["none", "3 Gbps × 3", "6 Gbps × 3", "6 Gbps × 4", "8 Gbps × 4", "10 Gbps × 4", "12 Gbps × 4"];
+const FRL_GBPS = [0, 9, 18, 24, 32, 40, 48];
+
+function svd(byte) {
+  if (byte >= 129 && byte <= 192) return { vic: byte & 0x7f, native: true };
+  return { vic: byte, native: false };
+}
+
+function dtd(b, o) {
+  const clk = (b[o] | b[o + 1] << 8) * 10; // kHz
+  const ha = b[o + 2] | (b[o + 4] & 0xf0) << 4, hb = b[o + 3] | (b[o + 4] & 0x0f) << 8;
+  const va = b[o + 5] | (b[o + 7] & 0xf0) << 4, vb = b[o + 6] | (b[o + 7] & 0x0f) << 8;
+  const il = (b[o + 17] & 0x80) !== 0;
+  const hz = clk * 1000 / ((ha + hb) * (va + vb)) * (il ? 2 : 1);
+  return { w: ha, h: il ? va * 2 : va, hz, il, mhz: clk / 1000 };
+}
+const dtdName = t => `${t.w}x${t.h}${t.il ? "i" : "p"}${t.hz.toFixed(t.hz % 1 > 0.05 && t.hz % 1 < 0.95 ? 2 : 0)}`;
+
+function parseEdid(b) {
+  if (b.length < 128 || u32(b, 0) !== 0xffffff00 || u32(b, 4) !== 0x00ffffff) return null;
+  const e = { modes: [], dtds: [], audio: [], speakers: [], y420: [], hdmi: null, hf: null, hdr: null, color: [], vsvdb: [] };
+  const w = b[8] << 8 | b[9];
+  e.maker = String.fromCharCode(64 + (w >> 10 & 31), 64 + (w >> 5 & 31), 64 + (w & 31));
+  e.product = b[10] | b[11] << 8;
+  e.serial = u32(b, 12);
+  e.week = b[16]; e.year = b[17] + 1990;
+  e.version = b[18] + "." + b[19];
+  e.digital = (b[20] & 0x80) !== 0;
+  if (e.digital && b[19] >= 4) {
+    e.depth = [null, 6, 8, 10, 12, 14, 16][b[20] >> 4 & 7];
+    e.iface = [null, "DVI", "HDMI-a", "HDMI-b", "MDDI", "DisplayPort"][b[20] & 15];
+  }
+  e.cm = [b[21], b[22]];
+  e.gamma = b[23] === 0xff ? null : (b[23] + 100) / 100;
+  for (const o of [54, 72, 90, 108]) {
+    if (b[o] | b[o + 1]) { e.dtds.push(dtd(b, o)); continue; }
+    const tag = b[o + 3];
+    const text = () => String.fromCharCode(...b.slice(o + 5, o + 18)).split("\n")[0].trim();
+    if (tag === 0xfc) e.name = text();
+    else if (tag === 0xff) e.serialText = text();
+    else if (tag === 0xfe) e.text = text();
+    else if (tag === 0xfd) {
+      const f = b[o + 4];
+      e.range = { vmin: b[o + 5] + (f & 1 ? 255 : 0), vmax: b[o + 6] + (f & 2 ? 255 : 0),
+        hmin: b[o + 7] + (f & 4 ? 255 : 0), hmax: b[o + 8] + (f & 8 ? 255 : 0), clk: b[o + 9] * 10 };
+    }
+  }
+  e.extensions = b[126];
+  for (let x = 128; x + 128 <= b.length; x += 128) {
+    if (b[x] !== 0x02) continue; // only CTA-861 extensions are decoded
+    e.cta = { rev: b[x + 1], underscan: !!(b[x + 3] & 0x80), basicAudio: !!(b[x + 3] & 0x40),
+      ycc444: !!(b[x + 3] & 0x20), ycc422: !!(b[x + 3] & 0x10) };
+    const end = x + b[x + 2];
+    for (let i = x + 4; i < end && i < x + 127;) {
+      const tag = b[i] >> 5, len = b[i] & 31, p = i + 1;
+      if (tag === 1) {
+        for (let k = p; k + 3 <= p + len; k += 3) {
+          const fmt = b[k] >> 3 & 15;
+          const rates = AUDIO_RATES.filter((_, j) => b[k + 1] & 1 << j);
+          const extra = fmt === 1 ? [16, 20, 24].filter((_, j) => b[k + 2] & 1 << j).join("/") + "-bit"
+            : fmt >= 2 && fmt <= 8 ? `≤${b[k + 2] * 8} kbps` : "";
+          e.audio.push({ fmt: AUDIO_FMT[fmt], ch: (b[k] & 7) + 1, rates, extra });
+        }
+      } else if (tag === 2) {
+        for (let k = p; k < p + len; k++) e.modes.push(svd(b[k]));
+      } else if (tag === 3) {
+        const oui = b[p] | b[p + 1] << 8 | b[p + 2] << 16;
+        if (oui === 0x000c03) {
+          e.hdmi = { addr: [b[p + 3] >> 4, b[p + 3] & 15, b[p + 4] >> 4, b[p + 4] & 15].join("."),
+            dc: len >= 6 ? [[0x40, 48], [0x20, 36], [0x10, 30]].filter(([m]) => b[p + 5] & m).map(([, v]) => v) : [],
+            y444dc: len >= 6 && !!(b[p + 5] & 0x08), ai: len >= 6 && !!(b[p + 5] & 0x80),
+            tmds: len >= 7 ? b[p + 6] * 5 : null };
+        } else if (oui === 0xc45dd8) {
+          e.hf = parseHf(b, p + 3, p + len);
+        }
+      } else if (tag === 4) {
+        e.speakers = SPEAKERS.filter((_, j) => b[p] & 1 << j);
+      } else if (tag === 7) {
+        const ext = b[p], q = p + 1, n = len - 1;
+        if (ext === 0) e.vcap = { qy: !!(b[q] & 0x80), qs: !!(b[q] & 0x40) };
+        else if (ext === 1) {
+          const oui = b[q] | b[q + 1] << 8 | b[q + 2] << 16;
+          e.vsvdb.push(oui === 0x00d046 ? "Dolby Vision" : oui === 0x90848b ? "HDR10+" : hx(oui, 6));
+        } else if (ext === 5) {
+          const names = ["xvYCC601", "xvYCC709", "sYCC601", "opYCC601", "opRGB", "BT2020 cYCC", "BT2020 YCC", "BT2020 RGB"];
+          e.color = names.filter((_, j) => b[q] & 1 << j);
+          if (n >= 2 && b[q + 1] & 0x80) e.color.push("DCI-P3");
+        } else if (ext === 6) {
+          const eotf = ["SDR", "HDR (gamma)", "HDR10 (PQ)", "HLG"].filter((_, j) => b[q] & 1 << j);
+          const maxL = n >= 3 && b[q + 2] ? 50 * Math.pow(2, b[q + 2] / 32) : null;
+          const avgL = n >= 4 && b[q + 3] ? 50 * Math.pow(2, b[q + 3] / 32) : null;
+          const minL = n >= 5 && maxL ? maxL * Math.pow(b[q + 4] / 255, 2) / 100 : null;
+          e.hdr = { eotf, maxL, avgL, minL };
+        } else if (ext === 7) e.hdrDynamic = true;
+        else if (ext === 14) for (let k = q; k < p + 1 + n; k++) e.y420.push(svd(b[k]).vic);
+        else if (ext === 15) e.y420map = true;
+        else if (ext === 0x79) e.hf = parseHf(b, q + 2, p + len); // HF-SCDB: as the HF-VSDB, after 2 bytes
+      }
+      i = p + len;
+    }
+    for (let o = end; o + 18 <= x + 127 && (b[o] | b[o + 1]); o += 18) e.dtds.push(dtd(b, o));
+  }
+  return e;
+}
+
+// The HDMI Forum block (HF-VSDB / HF-SCDB): s is the version byte, end the block end.
+function parseHf(b, s, end) {
+  const n = end - s;
+  const hf = { version: b[s], tmds: b[s + 1] ? b[s + 1] * 5 : null,
+    scdc: !!(b[s + 2] & 0x80), rr: !!(b[s + 2] & 0x40), scramble340: !!(b[s + 2] & 0x08),
+    frl: n > 3 ? b[s + 3] >> 4 : 0, dc420: n > 3 ? [[4, 48], [2, 36], [1, 30]].filter(([m]) => b[s + 3] & m).map(([, v]) => v) : [] };
+  if (n > 4) { hf.allm = !!(b[s + 4] & 0x02); hf.fva = !!(b[s + 4] & 0x04); hf.qms = !!(b[s + 4] & 0x40); }
+  if (n > 6) {
+    hf.vrrMin = b[s + 5] & 0x3f;
+    hf.vrrMax = (b[s + 5] & 0xc0) << 2 | b[s + 6];
+  }
+  if (n > 7) hf.dsc = !!(b[s + 7] & 0x80);
+  return hf;
+}
+
+let edidBytes = null;
+function renderDisplay(d) {
+  const rc = [];
+  if (d.edidRc) rc.push("EDID " + d.edidRc);
+  if (d.monitorRc) rc.push("monitor info " + d.monitorRc);
+  document.getElementById("dp-rc").textContent = rc.join(" · ") + (d.port ? " · port " + d.port : "");
+  const raw = d.edid ? hexBytes(d.edid) : null;
+  // byte 0 is the number of 128-byte blocks the library filled
+  edidBytes = raw && raw[0] ? raw.slice(1, 1 + Math.min(raw[0], 4) * 128) : null;
+  const mon = d.monitor ? hexBytes(d.monitor) : null;
+  document.getElementById("dp-edid-hex").textContent = edidBytes ? hexdump(edidBytes) : "—";
+  document.getElementById("dp-mon-hex").textContent = mon ? hexdump(mon) : "—";
+  const e = edidBytes ? parseEdid(edidBytes) : null;
+  if (!e) {
+    kv("dp-sink", [["EDID", d.edid ? "not a valid EDID" : "none (no HDMI sink, or the call failed)"]]);
+    kv("dp-hdmi", []); kv("dp-hdr", []);
+    document.getElementById("dp-modes").innerHTML = '<span class="note">—</span>';
+    document.getElementById("dp-audio").innerHTML = '<span class="note">—</span>';
+    return;
+  }
+  const pref = e.dtds[0];
+  const inches = e.cm[0] && e.cm[1] ? Math.hypot(e.cm[0], e.cm[1]) / 2.54 : null;
+  kv("dp-sink", [
+    ["Name", txt(e.name)],
+    ["Maker", `${esc(e.maker)} <small>product ${hx(e.product, 4)}</small>`],
+    ["Made", e.week === 0xff ? `model year ${e.year}` : e.week ? `week ${e.week}, ${e.year}` : String(e.year)],
+    ["EDID", `${esc(e.version)}` + (e.cta ? ` <small>+ CTA-861 rev ${e.cta.rev}, ${e.extensions} extension${e.extensions === 1 ? "" : "s"}</small>` : "")],
+    ["Input", e.digital ? "digital" + (e.iface ? " · " + e.iface : "") + (e.depth ? ` · ${e.depth}-bit` : "") : "analogue"],
+    ["Screen size", e.cm[0] && e.cm[1] ? `${e.cm[0]} × ${e.cm[1]} cm <small>(${inches.toFixed(0)}″)</small>` : "not given"],
+    ["Preferred mode", pref ? `${dtdName(pref)} <small>${pref.mhz.toFixed(2)} MHz pixel clock</small>` : "—"],
+    e.range && ["Range limits", `${e.range.vmin}–${e.range.vmax} Hz V · ${e.range.hmin}–${e.range.hmax} kHz H · ≤${e.range.clk} MHz`],
+    ["Serial", e.serial || e.serialText ? "reported <small>(not shown)</small>" : "none"],
+    e.gamma && ["Gamma", e.gamma.toFixed(2)],
+  ]);
+  const hdmi = e.hdmi, hf = e.hf;
+  kv("dp-hdmi", [
+    ["HDMI VSDB", hdmi ? `physical address ${esc(hdmi.addr)}` : "none <small>(DVI sink?)</small>"],
+    hdmi && ["Max TMDS", hdmi.tmds ? hdmi.tmds + " MHz" : "—"],
+    hdmi && ["Deep colour", hdmi.dc.length ? hdmi.dc.map(v => v + "-bit").join(", ") + (hdmi.y444dc ? " (also 4:4:4)" : "") : "none"],
+    ["HDMI 2.x (HF)", hf ? `version ${hf.version}` + (hf.tmds ? ` · TMDS ≤${hf.tmds} MHz` : "") : "none <small>(HDMI 1.4 sink)</small>"],
+    hf && ["FRL", hf.frl ? `${FRL[hf.frl] || hf.frl} <small>(${FRL_GBPS[hf.frl] || "?"} Gbps)</small>` : "none (TMDS only)"],
+    hf && ["SCDC · scrambling", `${flag(hf.scdc)} ${flag(hf.scramble340, "≤340 MHz scramble", "no low-rate scramble")}`],
+    hf && ["ALLM", flag(hf.allm)],
+    hf && ["VRR", hf.vrrMax ? `${hf.vrrMin}–${hf.vrrMax} Hz` : hf.vrrMin ? `min ${hf.vrrMin} Hz` : "no"],
+    hf && hf.dsc != null && ["DSC", flag(hf.dsc)],
+    hf && ["4:2:0 deep colour", hf.dc420.length ? hf.dc420.map(v => v + "-bit").join(", ") : "none"],
+    e.cta && ["Formats", [flag(e.cta.ycc444, "YCbCr 4:4:4", "no 4:4:4"), flag(e.cta.ycc422, "YCbCr 4:2:2", "no 4:2:2"),
+      e.y420.length || e.y420map ? flag(true, "YCbCr 4:2:0") : ""].join(" ")],
+    e.cta && ["Underscan", flag(e.cta.underscan)],
+  ]);
+  const seen = new Set();
+  const modeTag = m => {
+    const name = VIC[m.vic] || "VIC " + m.vic;
+    return `<span class="tag${m.native ? " native" : ""}" title="VIC ${m.vic}${m.native ? ", native" : ""}${e.y420.includes(m.vic) ? ", 4:2:0 only" : ""}">${esc(name)}</span>`;
+  };
+  const modes = e.modes.filter(m => !seen.has(m.vic) && seen.add(m.vic));
+  const y420only = e.y420.filter(v => !seen.has(v)).map(v => ({ vic: v, native: false }));
+  document.getElementById("dp-modes").innerHTML =
+    (modes.length ? modes.map(modeTag).join("") : '<span class="note">no short video descriptors</span>') +
+    (y420only.length ? `<div class="note" style="margin-top:6px">4:2:0 only</div>` + y420only.map(modeTag).join("") : "") +
+    (e.dtds.length ? `<div class="note" style="margin-top:6px">Detailed timings</div>` +
+      e.dtds.map(t => `<span class="tag" title="${t.mhz.toFixed(2)} MHz">${esc(dtdName(t))}</span>`).join("") : "");
+  const h = e.hdr;
+  kv("dp-hdr", [
+    ["EOTFs", h ? h.eotf.map(x => `<span class="tag on">${esc(x)}</span>`).join("") || "none" : "no HDR block <small>(SDR only)</small>"],
+    h && ["Peak luminance", h.maxL ? h.maxL.toFixed(0) + " cd/m²" : "not given"],
+    h && ["Frame-average", h.avgL ? h.avgL.toFixed(0) + " cd/m²" : "not given"],
+    h && ["Minimum", h.minL ? h.minL.toFixed(3) + " cd/m²" : "not given"],
+    ["Dynamic HDR", [e.hdrDynamic ? "HDR dynamic metadata" : "", ...e.vsvdb].filter(Boolean).map(x => `<span class="tag on">${esc(x)}</span>`).join("") || "none"],
+    ["Colorimetry", e.color.length ? e.color.map(x => `<span class="tag">${esc(x)}</span>`).join("") : "none declared"],
+    e.vcap && ["Quantisation", `${flag(e.vcap.qy, "YCC selectable", "YCC fixed")} ${flag(e.vcap.qs, "RGB selectable", "RGB fixed")}`],
+  ]);
+  document.getElementById("dp-audio").innerHTML =
+    (e.audio.length ? `<table class="log"><tr><th>Format</th><th>Ch</th><th>kHz</th><th></th></tr>` +
+      e.audio.map(a => `<tr><td>${esc(a.fmt)}</td><td>${a.ch}</td><td>${a.rates.join(", ")}</td><td>${esc(a.extra)}</td></tr>`).join("") + `</table>`
+      : `<span class="note">${e.cta && e.cta.basicAudio ? "basic audio only (2-ch LPCM)" : "no audio declared"}</span>`) +
+    (e.speakers.length ? `<div class="note" style="margin-top:8px">Speakers</div>` + e.speakers.map(s => `<span class="tag">${s}</span>`).join("") : "");
+}
+
+let dpBusy = false;
+async function loadDisplay() {
+  if (dpBusy) return;
+  dpBusy = true;
+  try {
+    const r = await fetch("/api/display", { cache: "no-store" });
+    const d = await r.json();
+    if (!d.ok) throw new Error(d.error || "error");
+    renderDisplay(d);
+  } catch (e) {
+    document.getElementById("dp-rc").textContent = "unavailable (" + e.message + "); an older payload has no /api/display";
+  } finally {
+    dpBusy = false;
+  }
+}
+document.getElementById("dp-refresh").onclick = loadDisplay;
+document.getElementById("dp-save").onclick = () => {
+  if (!edidBytes) return;
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([edidBytes], { type: "application/octet-stream" }));
+  a.download = "edid.bin";
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+};
+// slow readings: hardware every 15 s, the display once (and on Refresh)
+const HW_POLL_MS = 15000;
+setTimeout(() => { loadHardware(); loadDisplay(); setInterval(loadHardware, HW_POLL_MS); }, 600);
 
 window.addEventListener("resize", resizeCharts);
 // One request at a time: the next poll is scheduled when this one ends, sooner

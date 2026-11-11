@@ -51,6 +51,9 @@ Commands:
   notify TYPE MESSAGE   show a message: TYPE is toast (banner) or flyout (card)
   hwinfo                model, serial, version, SoC id, temperatures, cpu clock and
                         mode, cores, uptime, fan and SoC power
+  hwdetail              JSON: ICC boot counts, operating time, error and event logs,
+                        boot-stage times, secure clock, SMU clock table, system facts
+  display               JSON: the HDMI sink's raw EDID and monitor-info record
   df                    free space per mounted volume
   led ...               indicator LED: BLUE WHITE AMBER | off | auto | breathe B W A [MS] | chase [MS]
   lightbar R G B        attempt the physical DualSense lightbar (SceShellUI owns the pad)
@@ -535,6 +538,8 @@ def main():
     notifying.add_argument("type", choices=["toast", "flyout"])
     notifying.add_argument("message", nargs="+")
     commands.add_parser("hwinfo")
+    commands.add_parser("hwdetail")
+    commands.add_parser("display")
     commands.add_parser("df")
     commands.add_parser("led").add_argument("args", nargs="+",
         help="BLUE WHITE AMBER | off | auto | breathe B W A [MS] | chase [MS]")
@@ -661,6 +666,12 @@ def main():
         return say(command(f"notify {args.type} {' '.join(args.message)}")[0])
     if args.command == "hwinfo":
         return say(command("hwinfo")[0])
+    if args.command in ("hwdetail", "display"):
+        answer, data = command(args.command, payload=True)
+        if not answer.startswith("ok file"):
+            return say(answer)
+        print(data.decode("utf-8", "replace"))
+        return 0
     if args.command == "df":
         return fetch_text("df")
     if args.command == "led":
