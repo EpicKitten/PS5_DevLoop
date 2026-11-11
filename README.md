@@ -60,7 +60,8 @@ folder. Point any other agent at it first.
   (ImageMagick): `brew install jxrlib imagemagick`, or your distribution's
   packages.
 - To build: the [PS5 payload SDK](https://github.com/ps5-payload-dev/sdk).
-  `tools/build.sh` finds it through `PS5_PAYLOAD_SDK`.
+  `tools/build.sh` finds it through `PS5_PAYLOAD_SDK`; `BUILDING.md` walks
+  through building and deploying, Windows included.
 - The console's address in `PS5_HOST`, or in `.env` (copy `.env.example`).
 
 DevLoop presses buttons and looks. Launching and closing titles from a script,
