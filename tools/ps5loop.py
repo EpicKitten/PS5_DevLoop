@@ -49,6 +49,8 @@ Commands:
   rest / reboot / power-off   put the console in rest mode, reboot, or power off
   uninstall TITLE_ID    uninstall a title (registered titles; irreversible)
   notify TYPE MESSAGE   show a message: TYPE is toast (banner) or flyout (card)
+  trophy GRADE NAME     a notification in the trophy style (bronze, silver, gold,
+                        platinum; --sub sets the second line); nothing is unlocked
   hwinfo                model, serial, version, SoC id, temperatures, cpu clock and
                         mode, cores, uptime, fan and SoC power
   hwdetail              JSON: ICC boot counts, operating time, error and event logs,
@@ -537,6 +539,10 @@ def main():
     notifying = commands.add_parser("notify")
     notifying.add_argument("type", choices=["toast", "flyout"])
     notifying.add_argument("message", nargs="+")
+    trophying = commands.add_parser("trophy")
+    trophying.add_argument("grade", choices=["bronze", "silver", "gold", "platinum"])
+    trophying.add_argument("name", nargs="+")
+    trophying.add_argument("--sub", default="", help="the second line (default: DevLoop)")
     commands.add_parser("hwinfo")
     commands.add_parser("hwdetail")
     commands.add_parser("display")
@@ -664,6 +670,9 @@ def main():
         return say(command(f"uninstall {args.title_id}")[0])
     if args.command == "notify":
         return say(command(f"notify {args.type} {' '.join(args.message)}")[0])
+    if args.command == "trophy":
+        name = " ".join(args.name).replace("|", "/")
+        return say(command(f"trophy {args.grade} {name}" + (f"|{args.sub}" if args.sub else ""))[0])
     if args.command == "hwinfo":
         return say(command("hwinfo")[0])
     if args.command in ("hwdetail", "display"):

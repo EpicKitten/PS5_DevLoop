@@ -52,6 +52,8 @@
  *   uninstall TITLE_ID        uninstall a title
  *   power off|reboot|rest     power off, reboot, or enter rest mode
  *   notify TYPE MESSAGE       show a message: TYPE is toast or flyout
+ *   trophy GRADE NAME[|SUB]   a notification in the trophy style (bronze..platinum);
+ *                             only a notification, nothing is unlocked
  *   hwinfo                    model, serial, cpu + all SoC temps, cpu clock (and per
  *                             core), fan %, SoC power
  *   hwdetail                  JSON: the ICC's boot counts, operating time, error and
@@ -1955,6 +1957,81 @@ static void notify_flyout(int client, const char *message)
         reply(client, "%s notify flyout result=0x%08x", result == 0 ? "ok" : "err", (uint32_t)result);
 }
 
+// trophy GRADE NAME[|SUBTITLE]: a notification in the system's own trophy style.
+// It is only a notification: nothing is unlocked, recorded or synced. The
+// template, channel and fields are the notification overlay's (rnps-notification-
+// overlay, NPXS40011: InteractiveToastTrophy on the "Trophies" channel, bundle
+// "local:Trophy", use case NUC55); the icon is the system's own grade artwork in
+// /system_ex/vsh_asset, and the sound is the overlay's trophy sound, its platinum
+// one for platinum. Shown on 12.20 with the gold artwork and the name and subtitle.
+static int32_t trophy_send(const char *grade, const char *name, const char *subtitle)
+{
+    static const struct
+    {
+        const char *grade, *art, *sound;
+    } grades[] = {
+        {"bronze", "Bronze", "sfx_trophy_toast"},
+        {"silver", "Silver", "sfx_trophy_toast"},
+        {"gold", "Gold", "sfx_trophy_toast"},
+        {"platinum", "Platinum", "sfx_platinum_trophy_toast"},
+    };
+    size_t g = 0;
+    while (g + 1 < sizeof(grades) / sizeof(grades[0]) && strcasecmp(grade, grades[g].grade) != 0)
+        g++;
+    if (strcasecmp(grade, grades[g].grade) != 0)
+        return -2;
+    char safe_name[320], safe_sub[320];
+    json_escape(safe_name, sizeof(safe_name), name);
+    json_escape(safe_sub, sizeof(safe_sub), subtitle);
+    char *const json = malloc(4096);
+    if (json == NULL)
+        return -1;
+    snprintf(json, 4096,
+             "{\"rawData\":{\"viewTemplateType\":\"InteractiveToastTrophy\",\"channelType\":\"Trophies\","
+             "\"useCaseId\":\"NUC55\",\"bundleName\":\"local:Trophy\",\"toastOverwriteType\":\"No\","
+             "\"isImmediate\":true,\"priority\":100,\"soundEffect\":\"%s\","
+             "\"viewData\":{\"icon\":{\"type\":\"Url\",\"parameters\":{\"url\":"
+             "\"file:///system_ex/vsh_asset/TrophyUAM_%s.png\",\"iconSize\":\"Square\"}},"
+             "\"message\":{\"body\":\"%s\"},\"subMessage\":{\"body\":\"%s\"},"
+             "\"parameters\":{\"useCaseId\":\"NUC55\",\"trophy\":{\"trophyId\":1,\"trophyName\":\"%s\","
+             "\"trophyGrade\":\"%s\",\"trophyType\":\"%s\",\"trophyHidden\":false},"
+             "\"game\":{\"name\":\"%s\",\"titleName\":\"%s\"},\"label\":\"%s\"},"
+             "\"actions\":[{\"actionName\":\"View trophies\",\"actionType\":\"DeepLink\","
+             "\"defaultFocus\":true,\"parameters\":{\"actionUrl\":\"pstc:browse\"}}]}},"
+             "\"createdDateTime\":\"2025-01-01T00:00:00.000Z\",\"localNotificationId\":\"%u\"}",
+             grades[g].sound, grades[g].art, safe_name, safe_sub, safe_name, grades[g].grade,
+             grades[g].grade, safe_sub, safe_sub, safe_sub,
+             (unsigned)(monotonic_us() & 0x7fffffffu));
+    const int32_t result = sceNotificationSend(0xFE, true, json);
+    free(json);
+    return result;
+}
+
+static void trophy(int client, const char *grade, char *text)
+{
+    ensure_elevated();
+    if (grade == NULL || text == NULL || text[0] == '\0')
+    {
+        reply(client, "err usage: trophy bronze|silver|gold|platinum NAME[|SUBTITLE]");
+        return;
+    }
+    char *const bar = strchr(text, '|');
+    const char *subtitle = "DevLoop";
+    if (bar != NULL)
+    {
+        *bar = '\0';
+        if (bar[1] != '\0')
+            subtitle = bar + 1;
+    }
+    const int32_t result = trophy_send(grade, text, subtitle);
+    if (result == -2)
+        reply(client, "err trophy: grade is bronze, silver, gold or platinum");
+    else if (result == -1)
+        reply(client, "err trophy: out of memory");
+    else
+        reply(client, "%s trophy %s result=0x%08x", result == 0 ? "ok" : "err", grade, (uint32_t)result);
+}
+
 // The console's LAN address, as the routing table picks it: connecting a UDP
 // socket sends nothing, it only chooses the source address getsockname reports.
 // False when there is no route yet (the network is still coming up).
@@ -3836,6 +3913,15 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             reply(client, "err usage: notify toast|flyout MESSAGE");
         else
             notify(client, type, message);
+        return 0;
+    }
+    if (strcmp(command, "trophy") == 0)
+    {
+        const char *const grade = strtok(NULL, " \t");
+        char *text = strtok(NULL, "");
+        while (text != NULL && (*text == ' ' || *text == '\t'))
+            text++;
+        trophy(client, grade, text);
         return 0;
     }
     if (strcmp(command, "hwinfo") == 0)

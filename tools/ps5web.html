@@ -544,6 +544,11 @@
         <select id="nt-type"><option value="toast">toast</option><option value="flyout">flyout</option></select>
         <input id="nt-msg" placeholder="message">
         <button title="Show this message on the console&#x27;s screen, as a toast (banner) or a flyout (card)" onclick="runIf('nt-msg', m => 'notify ' + val('nt-type') + ' ' + m)">Send</button></div>
+      <div class="row"><label>Trophy</label>
+        <select id="tr-grade" title="The trophy grade: its artwork, and platinum's own sound"><option value="bronze">bronze</option><option value="silver">silver</option><option value="gold" selected>gold</option><option value="platinum">platinum</option></select>
+        <input id="tr-name" placeholder="trophy name">
+        <input id="tr-sub" placeholder="subtitle (game)">
+        <button title="Show a notification in the console&#x27;s trophy style, with the grade&#x27;s artwork and sound; only a notification: nothing is unlocked or recorded" onclick="runIf('tr-name', n => 'trophy ' + val('tr-grade') + ' ' + n.replace(/\|/g, '/') + (val('tr-sub') ? '|' + val('tr-sub') : ''))">Send</button></div>
       <div class="row"><label>Install</label><input id="app-pkg" placeholder="/path/to.pkg">
         <button title="Install a .pkg file already on the console (asks first)" class="danger" onclick="runIf('app-pkg', p => 'install ' + p, 'Install this package?')">Install</button></div>
       <div class="row"><label>Remove</label><input id="app-uninstall" placeholder="PPSA00000">
