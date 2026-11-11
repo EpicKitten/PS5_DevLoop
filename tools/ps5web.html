@@ -53,13 +53,17 @@
   .chart-card { margin-top: 14px; padding: 16px; }
   /* charts tile side by side once the window has room for two */
   /* four charts: one across, then two by two, then four in a row (never three and an orphan) */
-  .charts { display: grid; grid-template-columns: 1fr; gap: 14px; margin-top: 14px; }
-  @media (min-width: 1200px) { .charts { grid-template-columns: 1fr 1fr; } }
-  @media (min-width: 2600px) { .charts { grid-template-columns: repeat(4, 1fr); } }
-  .charts .chart-card { margin-top: 0; }
+  /* minmax(0, 1fr): a chart drawn wider (before the window shrank) must not hold its
+     column open; the box shrinks and the chart is redrawn to fit */
+  .charts { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; margin-top: 14px; }
+  @media (min-width: 1200px) { .charts { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+  @media (min-width: 2600px) { .charts { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+  .charts .chart-card { margin-top: 0; min-width: 0; }
+  .uchart { overflow: hidden; }
   .chart-head { width: 100%; display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px; }
   .chart-head .label { color: var(--muted); font-size: 13px; text-transform: uppercase; letter-spacing: .8px; }
-  .legend { display: flex; gap: 16px; font-size: 13px; color: var(--muted); }
+  .legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; color: var(--muted); }
+  .chart-head { flex-wrap: wrap; gap: 4px 12px; }
   .legend span { display: inline-flex; align-items: center; gap: 6px; }
   .legend .thr { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
   .legend .thr input { flex: none; margin: 0; padding: 0; accent-color: var(--accent); cursor: pointer; }
@@ -114,8 +118,20 @@
   /* a wide card takes two columns where there are two, and one on a narrow screen */
   .pcard.wide { grid-column: span 2; }
   @media (max-width: 860px) { .pcard.wide { grid-column: auto; } }
+  /* one grid holds the control, hardware and display cards; a small label says which */
+  .pcard[data-sec]::before { content: attr(data-sec); display: block; margin: -2px 0 4px; font-size: 10px;
+    font-weight: 650; text-transform: uppercase; letter-spacing: .9px; color: var(--accent); }
+  .pcard[data-sec="Hardware"]::before { color: var(--cool); }
+  .pcard[data-sec="Display"]::before { color: var(--warm); }
+  .pcard h3 .mini { margin-left: 8px; vertical-align: 1px; }
+  .pcard h3 .note { font-weight: 400; margin-left: 4px; }
   /* the console output stays the full width */
   .pcard.full { grid-column: 1 / -1; }
+  /* masonry (set by the script once it can measure): 2 px rows, each card spanning
+     as many as its height needs, so a short card no longer leaves the rest of a tall
+     row empty; "dense" then drops later cards into the holes */
+  body.masonry .panel { grid-auto-rows: 2px; row-gap: 0; }
+  body.masonry .panel > .pcard { margin-bottom: 14px; align-self: start; }
   .row.speed input[type=range] { flex: 1 1 140px; padding: 0; border: 0; background: none; accent-color: var(--accent); }
   .row.speed b { font-size: 12px; font-weight: 600; font-variant-numeric: tabular-nums; min-width: 88px; text-align: right; }
   .pcard h3 { margin: 0 0 10px; font-size: 14px; font-weight: 650; }
@@ -358,78 +374,10 @@
   </div>
   </div>
 
-  <!-- ================= hardware (GET /api/hwdetail) ================= -->
-  <h2 class="section">Hardware <button class="mini" id="hw-refresh" title="Read again">Refresh</button>
-    <span class="note" id="hw-when" style="text-transform:none;letter-spacing:0;font-weight:400"></span></h2>
-  <div class="panel">
-    <div class="pcard">
-      <h3>Power history <small>ICC counters</small></h3>
-      <dl class="kv" id="hw-power"><dt>—</dt><dd></dd></dl>
-    </div>
-    <div class="pcard">
-      <h3>Identity <small>model, SoC, firmware</small></h3>
-      <dl class="kv" id="hw-ident"><dt>—</dt><dd></dd></dl>
-    </div>
-    <div class="pcard">
-      <h3>Devices <small>power states and fitted parts</small></h3>
-      <dl class="kv" id="hw-devices"><dt>—</dt><dd></dd></dl>
-    </div>
-    <div class="pcard">
-      <h3>Memory and buses <small>budgets, error counters</small></h3>
-      <dl class="kv" id="hw-memory"><dt>—</dt><dd></dd></dl>
-    </div>
-    <div class="pcard wide">
-      <h3>SoC clock table <small>SMU, MHz; field names not known</small></h3>
-      <div id="hw-clocks"><span class="note">—</span></div>
-    </div>
-    <div class="pcard wide">
-      <h3>Last boot <small>ICC stage timestamps</small></h3>
-      <div id="hw-boot"><span class="note">—</span></div>
-    </div>
-    <div class="pcard wide">
-      <h3>ICC error log <small>newest first; codes not decoded</small></h3>
-      <div class="scroll" id="hw-errlog"><span class="note">—</span></div>
-      <details><summary>System event log, raw counters</summary><div id="hw-raw"></div></details>
-    </div>
-  </div>
-
-  <!-- ================= display (GET /api/display) ================= -->
-  <h2 class="section">Display <button class="mini" id="dp-refresh" title="Read the EDID again">Refresh</button></h2>
-  <div class="panel">
-    <div class="pcard">
-      <h3>Sink <small>from the EDID</small></h3>
-      <dl class="kv" id="dp-sink"><dt>—</dt><dd></dd></dl>
-    </div>
-    <div class="pcard">
-      <h3>HDMI capabilities <small>CTA-861 extension</small></h3>
-      <dl class="kv" id="dp-hdmi"><dt>—</dt><dd></dd></dl>
-    </div>
-    <div class="pcard wide">
-      <h3>Video modes <small>blue = native</small></h3>
-      <div id="dp-modes"><span class="note">—</span></div>
-    </div>
-    <div class="pcard">
-      <h3>HDR and colour</h3>
-      <dl class="kv" id="dp-hdr"><dt>—</dt><dd></dd></dl>
-    </div>
-    <div class="pcard">
-      <h3>Audio</h3>
-      <div id="dp-audio"><span class="note">—</span></div>
-    </div>
-    <div class="pcard wide">
-      <h3>Raw <small>EDID and the system's monitor-info record</small></h3>
-      <div class="row" style="margin-top:0"><button class="mini" id="dp-save">Save EDID (.bin)</button>
-        <span class="note" id="dp-rc"></span></div>
-      <details><summary>EDID hex</summary><pre class="hexdump" id="dp-edid-hex"></pre></details>
-      <details><summary>Monitor-info record hex (0x144 bytes)</summary><pre class="hexdump" id="dp-mon-hex"></pre></details>
-    </div>
-  </div>
-
-  <!-- ================= control panel ================= -->
-  <h2 class="section">Control</h2>
+  <!-- ================= control, hardware and display: one masonry grid ================= -->
 
   <!-- output console -->
-  <div class="pcard full">
+  <div class="pcard full" style="margin-top:14px">
     <div class="outhead">
       <h3 style="margin:0">Console output</h3>
       <div class="row" style="margin:0">
@@ -444,10 +392,10 @@
     <div class="hint" style="margin-bottom:0">Runs verbatim through /api/run. Every command in AGENTS.md works here.</div>
   </div>
 
-  <div class="panel">
+  <div class="panel" id="cards">
 
     <!-- virtual pad -->
-    <div class="pcard">
+    <div data-sec="Control" class="pcard">
       <h3>Virtual pad <small>input</small></h3>
       <div class="row">
         <button class="go" onclick="run('pad open')">Open</button>
@@ -516,7 +464,7 @@
     </div>
 
     <!-- sight -->
-    <div class="pcard">
+    <div data-sec="Control" class="pcard">
       <h3>Sight <small>frame &amp; screenshot</small></h3>
       <div class="row">
         <button class="go" onclick="run('screenshot')">Screenshot</button>
@@ -532,7 +480,7 @@
     </div>
 
     <!-- apps -->
-    <div class="pcard">
+    <div data-sec="Control" class="pcard">
       <h3>Apps &amp; system</h3>
       <div class="row">
         <button onclick="run('ps')">ps</button>
@@ -558,7 +506,7 @@
     </div>
 
     <!-- files -->
-    <div class="pcard">
+    <div data-sec="Control" class="pcard">
       <h3>Files</h3>
       <div class="row"><label>ls</label><input id="f-ls" value="/" placeholder="/path">
         <button onclick="runIf('f-ls', p => 'ls ' + p)">List</button></div>
@@ -576,7 +524,7 @@
     </div>
 
     <!-- hardware -->
-    <div class="pcard">
+    <div data-sec="Control" class="pcard">
       <h3>Indicator LED, fan, beeper</h3>
       <div class="row"><label>LED</label>
         <span class="hint" style="margin:0">B/W/A 0–255</span>
@@ -618,7 +566,7 @@
     </div>
 
     <!-- memory / process -->
-    <div class="pcard">
+    <div data-sec="Control" class="pcard">
       <h3>Process &amp; memory <small>advanced</small></h3>
       <div class="row"><label>modules</label><input id="m-mods" placeholder="pid">
         <button onclick="runIf('m-mods', p => 'modules ' + p)">List</button></div>
@@ -653,7 +601,7 @@
     </div>
 
     <!-- raw + power -->
-    <div class="pcard wide">
+    <div data-sec="Control" class="pcard wide">
       <h3>Power</h3>
       <div class="row">
         <button class="danger" onclick="runIf(null, () => 'power rest', 'Put the console into rest mode?')">power rest</button>
@@ -662,6 +610,68 @@
       </div>
     </div>
 
+
+    <!-- hardware (GET /api/hwdetail) -->
+    <div data-sec="Hardware" class="pcard">
+      <h3>Power history <small>ICC counters</small>
+        <button class="mini" id="hw-refresh" title="Read the hardware section again">Refresh</button> <span class="note" id="hw-when"></span></h3>
+      <dl class="kv" id="hw-power"><dt>—</dt><dd></dd></dl>
+    </div>
+    <div data-sec="Hardware" class="pcard">
+      <h3>Identity <small>model, SoC, firmware</small></h3>
+      <dl class="kv" id="hw-ident"><dt>—</dt><dd></dd></dl>
+    </div>
+    <div data-sec="Hardware" class="pcard">
+      <h3>Devices <small>power states and fitted parts</small></h3>
+      <dl class="kv" id="hw-devices"><dt>—</dt><dd></dd></dl>
+    </div>
+    <div data-sec="Hardware" class="pcard">
+      <h3>Memory and buses <small>budgets, error counters</small></h3>
+      <dl class="kv" id="hw-memory"><dt>—</dt><dd></dd></dl>
+    </div>
+    <div data-sec="Hardware" class="pcard">
+      <h3>SoC clock table <small>SMU, MHz; field names not known</small></h3>
+      <div id="hw-clocks"><span class="note">—</span></div>
+    </div>
+    <div data-sec="Hardware" class="pcard">
+      <h3>Last boot <small>ICC stage timestamps</small></h3>
+      <div id="hw-boot"><span class="note">—</span></div>
+    </div>
+    <div data-sec="Hardware" class="pcard wide">
+      <h3>ICC error log <small>newest first; codes not decoded</small></h3>
+      <div class="scroll" id="hw-errlog"><span class="note">—</span></div>
+      <details><summary>System event log, raw counters</summary><div id="hw-raw"></div></details>
+    </div>
+
+    <!-- display (GET /api/display) -->
+    <div data-sec="Display" class="pcard">
+      <h3>Sink <small>from the EDID</small>
+        <button class="mini" id="dp-refresh" title="Read the EDID again">Refresh</button></h3>
+      <dl class="kv" id="dp-sink"><dt>—</dt><dd></dd></dl>
+    </div>
+    <div data-sec="Display" class="pcard">
+      <h3>HDMI capabilities <small>CTA-861 extension</small></h3>
+      <dl class="kv" id="dp-hdmi"><dt>—</dt><dd></dd></dl>
+    </div>
+    <div data-sec="Display" class="pcard wide">
+      <h3>Video modes <small>blue = native</small></h3>
+      <div id="dp-modes"><span class="note">—</span></div>
+    </div>
+    <div data-sec="Display" class="pcard">
+      <h3>HDR and colour</h3>
+      <dl class="kv" id="dp-hdr"><dt>—</dt><dd></dd></dl>
+    </div>
+    <div data-sec="Display" class="pcard">
+      <h3>Audio</h3>
+      <div id="dp-audio"><span class="note">—</span></div>
+    </div>
+    <div data-sec="Display" class="pcard">
+      <h3>Raw <small>EDID and the system's monitor-info record</small></h3>
+      <div class="row" style="margin-top:0"><button class="mini" id="dp-save">Save EDID (.bin)</button>
+        <span class="note" id="dp-rc"></span></div>
+      <details><summary>EDID hex</summary><pre class="hexdump" id="dp-edid-hex"></pre></details>
+      <details><summary>Monitor-info record hex (0x144 bytes)</summary><pre class="hexdump" id="dp-mon-hex"></pre></details>
+    </div>
   </div>
 
   <footer>Polling the console every 2&nbsp;s · hardware info and control via the DevLoop payload</footer>
@@ -2073,6 +2083,26 @@ document.getElementById("dp-save").onclick = () => {
 // slow readings: hardware every 15 s, the display once (and on Refresh)
 const HW_POLL_MS = 15000;
 setTimeout(() => { loadHardware(); loadDisplay(); setInterval(loadHardware, HW_POLL_MS); }, 600);
+
+// ---- masonry packing of the cards in each .panel ----
+// Each card spans ceil((height + gap) / 2 px) grid rows; a ResizeObserver refits a
+// card whenever its content changes height (a picture shown, a log filled, a
+// details box opened) or the columns change width.
+const MASONRY_ROW = 2, MASONRY_GAP = 14;
+function masonryFit(card) {
+  const h = card.getBoundingClientRect().height;
+  if (h > 0) card.style.gridRowEnd = "span " + Math.ceil((h + MASONRY_GAP) / MASONRY_ROW);
+}
+function masonryAll() { document.querySelectorAll(".panel > .pcard").forEach(masonryFit); }
+document.body.classList.add("masonry");
+masonryAll();
+if (window.ResizeObserver) {
+  const ro = new ResizeObserver(entries => { for (const e of entries) masonryFit(e.target); });
+  document.querySelectorAll(".panel > .pcard").forEach(c => ro.observe(c));
+}
+// a backstop for browsers (or hidden tabs) where the observer does not report
+window.addEventListener("resize", masonryAll);
+setInterval(masonryAll, 2000);
 
 window.addEventListener("resize", resizeCharts);
 // the charts' boxes change width when the grid reflows (two across, then one), not
