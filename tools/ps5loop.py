@@ -4,10 +4,18 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """Press buttons on the console and see what its screen shows.
 
+This is DevLoop's client cut down to what testing Playden games uses: the pad,
+the screen, the console's files and processes, and its logs. The payload still
+answers DevLoop's other commands; `raw` reaches them for bring-up.
+
 Commands:
   load [ELF]            send the payload to the console's ELF loader (once a boot)
   ping                  is the payload there
+  doctor                check the host, payload, loader and capture tools
+  discover [--timeout S]  find consoles on this LAN by UDP broadcast
+  wake                  wake from standby (UDP packet; needs PS5_WAKE_CREDENTIAL)
   raw WORDS...          send one command line as it is, print the answer
+
   open [USERID]         create the virtual pad, give it to the foreground user, close
                         the prompt the console raises, and disconnect any real
                         controller so that titles read the pad
@@ -16,76 +24,38 @@ Commands:
   pads                  every virtual pad's state. Up to 4 pads: --pad N (1-4) on open,
                         close, status, press, hold, release and seq picks one; pads 2-4
                         go to the next signed-in user without a pad and never
-                        disconnect a real controller
+                        disconnect a real controller (for local multiplayer)
   press BUTTONS [--ms]  press and release: "cross", "l1+r1", "down"
   hold BUTTONS [--lx ..] hold buttons, sticks (0-255, 128 centre) and triggers
   release               let everything go
   seq STEPS...          steps in order: a button press ("down", "cross:300" for
                         300 ms), or "wait:500"
+
   screenshot [FILE]     the whole screen, system UI included, through the console's
-                        own screenshot: about 3 s. For the home screen and dialogs
-  frame [FILE]          ask the running title for its own frame (--title, from
-                        titles.json): about 1 s. Use it whenever a title runs
+                        own screenshot: about 3 s
   latest-capture [FILE] fetch the newest capture without pressing anything
   list-captures         list the console's newest captures
   delete-capture PATH   delete a leftover capture as the gallery does
-  kernel-log [MS] [FILE] dump the console's kernel log: bring-up, for reading the
-                        device and controller lines a new firmware prints
-  doctor                check the host, payload, loader and capture tools
+
   ps                    list the console's processes (with title ids)
+  locate-title          what is in the foreground now (app id, pid, title id)
+  close-app [APP_ID]    close a running app (app id from ps; else the big app)
+  kill PID              end a process by pid (a game that close-app leaves behind)
   ls PATH               list a console directory
   get REMOTE [LOCAL]    download a console file (default: downloads/<name>)
-  hash PATH             SHA-256 of a console file (verify a transfer in place)
   put LOCAL REMOTE      upload a local file to the console
   rm PATH               delete a console file
   mv SRC DST            move or rename a console file
-  open-url URL          open a URL in the console's web browser
-  launch TITLE_ID       launch an installed title
-  close-app [APP_ID]    close a running app (app id from ps; else the big app)
-  locate-title          what is in the foreground now (app id, pid, title id)
-  module PID NAME       where a module is mapped in a process (base, entry)
-  modules PID           every loaded module in a process (handle, base, entry)
-  dlsym PID NAME SYM    resolve a symbol's address in a process
-  call PID ADDR [ARGS]  call a function in a process (up to 6 int args) -> RAX
-  install /PATH.pkg     install a .pkg already on the console
-  exec /PATH [ARGS]     run a console binary and return its output
-  wake                  wake from standby (UDP packet; needs PS5_WAKE_CREDENTIAL)
-  rest / reboot / power-off   put the console in rest mode, reboot, or power off
-  uninstall TITLE_ID    uninstall a title (registered titles; irreversible)
-  notify TYPE MESSAGE   show a message: TYPE is toast (banner) or flyout (card)
-  trophy GRADE NAME     a notification in the trophy style (bronze, silver, gold,
-                        platinum; --sub sets the second line); nothing is unlocked
-  hwinfo                model, serial, version, SoC id, temperatures, cpu clock and
-                        mode, cores, uptime, fan and SoC power
-  hwdetail              JSON: ICC boot counts, operating time, error and event logs,
-                        boot-stage times, secure clock, SMU clock table, system facts
-  display               JSON: the HDMI sink's raw EDID and monitor-info record
   df                    free space per mounted volume
-  led ...               indicator LED: BLUE WHITE AMBER | off | auto | breathe B W A [MS] | chase [MS]
-  lightbar R G B        attempt the physical DualSense lightbar (SceShellUI owns the pad)
-  keyboard [open|status|close]   diagnostic: invoke sceImeDialog (it does not render from the payload)
-  fan [TEMP]            read the fan duty, or set the threshold (30..90 C)
-  beeper [PATTERN|mute 0|1|dim 0..2|status]   beep, mute, set the beeper's dim level
-                        (0 full, 1 soft, 2 softest; vol is an alias), or read them
-  kill PID              end a process by pid
-  peek PID ADDR LEN     read a process's memory (prints hex + ascii)
-  poke PID ADDR HEX     write a hex string into a process's memory (verified)
-  scan PID ADDR LEN W V find a W-byte integer V in a span (W is 1, 2, 4 or 8)
-  scan-aob PID ADDR LEN PATTERN   find a byte pattern in a span (?? = wildcard)
-  kern-read ADDR LEN    read kernel memory at an absolute address
-  kern-write ADDR HEX   write kernel memory at an absolute address (verified)
+  hwinfo                model, firmware, temperatures, cpu clock, fan and SoC power
+  kernel-log [MS] [FILE] dump the console's kernel log (what a crashing game left)
   klog-stream [MS]      stream the kernel log live (Ctrl+C to stop)
-  discover [--timeout S]  find consoles on this LAN by UDP broadcast
-  http URL              fetch an http:// URL (saved under downloads/)
-  settings [FILE]       read the system registry as JSON (saved under downloads/)
-  setting-set REGID V   write one integer setting by its regId (verified)
 
 The console's address comes from PS5_HOST in the environment, then from .env in
 this project (.env.example). It is never printed.
 """
 
 import argparse
-import json
 import os
 import socket
 import subprocess
@@ -98,13 +68,6 @@ PORT = int(os.environ.get("PS5LOOP_PORT", "9112"))
 LOADER_PORT = int(os.environ.get("PS5_LOADER_PORT", "9021"))
 # What a picture is scaled down to, so that it can be looked at cheaply.
 VIEW_WIDTH = 1280
-
-# Titles that answer a request file with a picture of their frame (AGENTS.md,
-# "Giving a title grab"): the file the title looks for, and the folder it writes
-# the picture into.
-TITLES = json.loads((ROOT / "titles.json").read_text(encoding="utf-8"))
-NO_HOOK = ("the title did not answer: is it running, and does it have the frame hook? "
-           "(AGENTS.md, \"Giving a title a frame\"); screenshot takes the whole screen meanwhile")
 
 BUTTONS = {
     "create": 0x1, "l3": 0x2, "r3": 0x4, "options": 0x8,
@@ -272,6 +235,48 @@ def run_tool(command):
         return None
 
 
+WIC_SCRIPT = """
+Add-Type -AssemblyName PresentationCore
+$in = [IO.File]::OpenRead($args[0])
+$decoder = [Windows.Media.Imaging.BitmapDecoder]::Create($in, 'PreservePixelFormat', 'OnLoad')
+$rgb = New-Object Windows.Media.Imaging.FormatConvertedBitmap($decoder.Frames[0], [Windows.Media.PixelFormats]::Bgr24, $null, 0)
+$encoder = New-Object Windows.Media.Imaging.PngBitmapEncoder
+$encoder.Frames.Add([Windows.Media.Imaging.BitmapFrame]::Create($rgb))
+$out = [IO.File]::Create($args[1])
+$encoder.Save($out)
+$out.Close()
+$in.Close()
+"""
+
+
+def wic_png(source, target):
+    """Decode a JPEG XR with Windows' own codec (no jxrlib needed). True when the PNG was written."""
+    if os.name != "nt":
+        return False
+    script = Path(target).with_suffix(".wic.ps1")
+    script.write_text(WIC_SCRIPT, encoding="utf-8")
+    try:
+        done = run_tool(["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(script),
+                         str(Path(source).resolve()), str(Path(target).resolve())])
+    finally:
+        script.unlink(missing_ok=True)
+    return done is not None and done.returncode == 0 and Path(target).is_file()
+
+
+def pillow_scale(source, target):
+    """Scale a picture to VIEW_WIDTH with Pillow, where ImageMagick is not installed."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return False
+    with Image.open(source) as picture:
+        picture = picture.convert("RGB")
+        if picture.width > VIEW_WIDTH:
+            picture = picture.resize((VIEW_WIDTH, round(picture.height * VIEW_WIDTH / picture.width)))
+        picture.save(target, "PNG")
+    return True
+
+
 def to_png(data, target):
     """Write a capture as a PNG to look at, whatever the console saved it as."""
     target = Path(target)
@@ -292,6 +297,9 @@ def to_png(data, target):
             if decoded is None or (decoded.returncode == 0 and tiff.is_file()):
                 break
         if decoded is None:
+            # No jxrlib: Windows decodes JPEG XR itself, and Pillow scales the result.
+            if wic_png(raw, target) and pillow_scale(target, target):
+                return target
             print(f"kept {raw}: install jxrlib (JxrDecApp) to decode the console's HDR captures")
             return raw
         if decoded.returncode != 0 or not tiff.is_file():
@@ -308,7 +316,11 @@ def to_png(data, target):
     scaled = run_tool(["magick", str(source), *levels, "-resize", f"{VIEW_WIDTH}x>",
                        "-depth", "8", str(target)])
     if scaled is None:
-        print(f"kept {source}: install ImageMagick (magick) to scale captures for viewing")
+        if pillow_scale(source, target):
+            if source != target:
+                source.unlink(missing_ok=True)
+            return target
+        print(f"kept {source}: install ImageMagick (magick) or Pillow to scale captures for viewing")
         return source
     if scaled.returncode != 0:
         print(f"kept {source}: magick could not convert it ({scaled.stderr.strip()[-200:]})")
@@ -364,9 +376,13 @@ def doctor():
     except OSError:
         print(f"-- loader port {LOADER_PORT} closed (load needs it)")
         ok = False
+    import importlib.util
+    pillow = importlib.util.find_spec("PIL") is not None
     for tool, package in (("JxrDecApp", "jxrlib"), ("magick", "ImageMagick")):
         if shutil.which(tool):
             print(f"ok {tool} found")
+        elif pillow and (tool == "magick" or os.name == "nt"):
+            print(f"ok {tool} missing, covered by " + ("Pillow" if tool == "magick" else "Windows' own decoder"))
         else:
             print(f"-- {tool} missing: install {package} to decode captures "
                   "(raw files are still saved)")
@@ -494,36 +510,38 @@ def main():
     hold.add_argument("buttons", nargs="?", default="")
     for axis, default in (("lx", 128), ("ly", 128), ("rx", 128), ("ry", 128), ("l2", 0), ("r2", 0)):
         hold.add_argument(f"--{axis}", type=int, default=default)
-    commands.add_parser("release")
+    release = commands.add_parser("release")
     steps = commands.add_parser("seq")
     steps.add_argument("steps", nargs="+")
     steps.add_argument("--ms", type=int, default=80, help="how long each press is held")
     steps.add_argument("--gap", type=int, default=250, help="the pause after each press")
-    release = commands.choices["release"]
     for sub in (opening, closing, status, press, hold, release, steps):
         sub.add_argument("--pad", type=int, choices=range(1, 5), default=1,
                          help="which virtual pad, 1-4 (default 1)")
     screenshot = commands.add_parser("screenshot")
     screenshot.add_argument("file", nargs="?")
     screenshot.add_argument("--hold", type=int, default=0, help="how long Create is held, in ms")
-    framing = commands.add_parser("frame")
-    framing.add_argument("file", nargs="?")
-    framing.add_argument("--title", default=next(iter(TITLES)), choices=sorted(TITLES),
-                         help="a title from titles.json")
     commands.add_parser("latest-capture").add_argument("file", nargs="?")
     commands.add_parser("list-captures")
+    commands.add_parser("delete-capture").add_argument("path",
+                                                       help="a capture under /user/av_contents/")
     kernel_log = commands.add_parser("kernel-log")
     kernel_log.add_argument("ms", nargs="?", default="1500", help="how long to read, in ms")
     kernel_log.add_argument("file", nargs="?")
-    commands.add_parser("delete-capture").add_argument("path",
-                                                       help="a capture under /user/av_contents/")
+    commands.add_parser("klog-stream").add_argument("ms", nargs="?",
+                                                   help="optional cap in ms; default until you quit")
     commands.add_parser("doctor")
+    commands.add_parser("discover").add_argument("--timeout", type=float, default=2.0)
+    commands.add_parser("wake")
     commands.add_parser("ps")
+    commands.add_parser("locate-title")
+    commands.add_parser("close-app").add_argument("app_id", nargs="?",
+                                                 help="an app id from ps; omitted, the running big app")
+    commands.add_parser("kill").add_argument("pid")
     commands.add_parser("ls").add_argument("path")
     getting = commands.add_parser("get")
     getting.add_argument("remote")
     getting.add_argument("local", nargs="?")
-    commands.add_parser("hash").add_argument("path")
     putting = commands.add_parser("put")
     putting.add_argument("local")
     putting.add_argument("remote")
@@ -531,91 +549,8 @@ def main():
     moving = commands.add_parser("mv")
     moving.add_argument("src")
     moving.add_argument("dst")
-    commands.add_parser("open-url").add_argument("url")
-    commands.add_parser("launch").add_argument("title_id")
-    commands.add_parser("close-app").add_argument("app_id", nargs="?",
-                                                 help="an app id from ps; omitted, the running big app")
-    commands.add_parser("locate-title")
-    moduling = commands.add_parser("module")
-    moduling.add_argument("pid")
-    moduling.add_argument("name", help="a module basename, e.g. libc.sprx")
-    commands.add_parser("modules").add_argument("pid", help="list every loaded module in a process")
-    dlsyming = commands.add_parser("dlsym")
-    dlsyming.add_argument("pid")
-    dlsyming.add_argument("name", help="a module basename")
-    dlsyming.add_argument("symbol")
-    calling = commands.add_parser("call")
-    calling.add_argument("pid")
-    calling.add_argument("addr", help="function address, hex (e.g. from dlsym)")
-    calling.add_argument("args", nargs="*", help="up to 6 integer args (hex or decimal)")
-    commands.add_parser("install").add_argument("path", help="a console path to a .pkg")
-    execing = commands.add_parser("exec")
-    execing.add_argument("args", nargs=argparse.REMAINDER, help="/PATH [ARGS] to run on the console")
-    commands.add_parser("rest")
-    commands.add_parser("reboot")
-    commands.add_parser("power-off")
-    commands.add_parser("wake")
-    commands.add_parser("uninstall").add_argument("title_id")
-    notifying = commands.add_parser("notify")
-    notifying.add_argument("type", choices=["toast", "flyout"])
-    notifying.add_argument("message", nargs="+")
-    trophying = commands.add_parser("trophy")
-    trophying.add_argument("grade", choices=["bronze", "silver", "gold", "platinum"])
-    trophying.add_argument("name", nargs="+")
-    trophying.add_argument("--sub", default="", help="the second line (default: DevLoop)")
-    commands.add_parser("hwinfo")
-    commands.add_parser("hwdetail")
-    commands.add_parser("display")
     commands.add_parser("df")
-    commands.add_parser("led").add_argument("args", nargs="+",
-        help="BLUE WHITE AMBER | off | auto | breathe B W A [MS] | chase [MS]")
-    lightbar = commands.add_parser("lightbar")
-    lightbar.add_argument("r", type=int)
-    lightbar.add_argument("g", type=int)
-    lightbar.add_argument("b", type=int)
-    keyboarding = commands.add_parser("keyboard")
-    keyboarding.add_argument("action", nargs="?", default="status",
-                             choices=["open", "status", "close"])
-    keyboarding.add_argument("spec", nargs="*",
-                             help="for open: TITLE[|PLACEHOLDER[|TEXT]]")
-    fanning = commands.add_parser("fan")
-    fanning.add_argument("temp", nargs="?", help="omit to read; a number to set the threshold (30..90)")
-    commands.add_parser("beeper").add_argument("args", nargs="*", help="[PATTERN] | mute 0|1 | dim 0..2 (0 full, 2 softest) | status")
-    commands.add_parser("kill").add_argument("pid")
-    peeking = commands.add_parser("peek")
-    peeking.add_argument("pid")
-    peeking.add_argument("addr", help="hex (0x...) or decimal")
-    peeking.add_argument("len")
-    poking = commands.add_parser("poke")
-    poking.add_argument("pid")
-    poking.add_argument("addr")
-    poking.add_argument("hex", help="bytes as a hex string, e.g. deadbeef")
-    scanning = commands.add_parser("scan")
-    scanning.add_argument("pid")
-    scanning.add_argument("addr")
-    scanning.add_argument("len")
-    scanning.add_argument("width", help="integer width in bytes: 1, 2, 4 or 8")
-    scanning.add_argument("value", help="hex (0x...) or decimal")
-    aob = commands.add_parser("scan-aob")
-    aob.add_argument("pid")
-    aob.add_argument("addr")
-    aob.add_argument("len")
-    aob.add_argument("pattern", help="hex byte pairs, ?? for a wildcard")
-    kread = commands.add_parser("kern-read")
-    kread.add_argument("addr", help="absolute kernel address, hex")
-    kread.add_argument("len")
-    kwrite = commands.add_parser("kern-write")
-    kwrite.add_argument("addr", help="absolute kernel address, hex")
-    kwrite.add_argument("hex", help="bytes as a hex string")
-    commands.add_parser("klog-stream").add_argument("ms", nargs="?",
-                                                   help="optional cap in ms; default until you quit")
-    commands.add_parser("discover").add_argument("--timeout", type=float, default=2.0)
-    commands.add_parser("http").add_argument("url", help="an http:// URL")
-    commands.add_parser("settings").add_argument("file", nargs="?",
-                                                help="where to save the JSON (default downloads/)")
-    setset = commands.add_parser("setting-set")
-    setset.add_argument("regid", help="a regId in hex, from a settings dump")
-    setset.add_argument("value", type=int)
+    commands.add_parser("hwinfo")
     args = parser.parse_args()
 
     if args.command == "load":
@@ -626,12 +561,6 @@ def main():
         return sequence(args)
     if args.command == "screenshot":
         return fetch(f"screenshot {args.hold}" if args.hold else "screenshot", args)
-    if args.command == "frame":
-        title = TITLES[args.title]
-        status = fetch(f"frame {title['request']} {title['folder']}", args)
-        if status != 0:
-            print(NO_HOOK)
-        return status
     if args.command == "latest-capture":
         return fetch("latest-capture", args)
     if args.command == "kernel-log":
@@ -643,149 +572,38 @@ def main():
         out.write_bytes(data)
         print(f"ok kernel-log {len(data)} bytes -> {out}")
         return 0
-    if args.command == "delete-capture":
-        return say(command(f"delete-capture {args.path}")[0])
+    if args.command == "klog-stream":
+        return klog_stream(args.ms)
     if args.command == "doctor":
         return doctor()
-    if args.command == "ps":
-        return fetch_text("ps")
+    if args.command == "discover":
+        return discover(args.timeout)
+    if args.command == "wake":
+        return wake()
+    if args.command in ("ps", "df"):
+        return fetch_text(args.command)
     if args.command == "ls":
         return fetch_text(f"ls {args.path}")
     if args.command == "get":
         return get_file(args.remote, args.local)
-    if args.command == "hash":
-        return say(command(f"hash {args.path}", timeout=300)[0])
     if args.command == "put":
         return put_file(args.local, args.remote)
-    if args.command == "rm":
-        return say(command(f"rm {args.path}")[0])
-    if args.command == "mv":
-        return say(command(f"mv {args.src} {args.dst}")[0])
-    if args.command == "open-url":
-        return say(command(f"open-url {args.url}")[0])
-    if args.command == "launch":
-        return say(command(f"launch {args.title_id}")[0])
-    if args.command == "close-app":
-        return say(command(f"close-app {args.app_id}" if args.app_id else "close-app")[0])
-    if args.command == "locate-title":
-        return say(command("locate-title")[0])
-    if args.command == "module":
-        return say(command(f"module {args.pid} {args.name}")[0])
-    if args.command == "modules":
-        return fetch_text(f"modules {args.pid}")
-    if args.command == "dlsym":
-        return say(command(f"dlsym {args.pid} {args.name} {args.symbol}")[0])
-    if args.command == "call":
-        return say(command(f"call {args.pid} {args.addr} " + " ".join(args.args), timeout=30)[0])
-    if args.command == "install":
-        return say(command(f"install {args.path}", timeout=120)[0])
-    if args.command == "exec":
-        answer, data = command("exec " + " ".join(args.args), timeout=120, payload=True)
-        if not answer.startswith("ok file"):
-            return say(answer)
-        print(answer.split("path=", 1)[1] if "path=" in answer else "exec")
-        sys.stdout.write(data.decode("utf-8", "replace"))
-        return 0
-    if args.command in ("rest", "reboot", "power-off"):
-        what = {"rest": "rest", "reboot": "reboot", "power-off": "off"}[args.command]
-        return say(command(f"power {what}")[0])
-    if args.command == "wake":
-        return wake()
-    if args.command == "uninstall":
-        return say(command(f"uninstall {args.title_id}")[0])
-    if args.command == "notify":
-        return say(command(f"notify {args.type} {' '.join(args.message)}")[0])
-    if args.command == "trophy":
-        name = " ".join(args.name).replace("|", "/")
-        return say(command(f"trophy {args.grade} {name}" + (f"|{args.sub}" if args.sub else ""))[0])
-    if args.command == "hwinfo":
-        return say(command("hwinfo")[0])
-    if args.command in ("hwdetail", "display"):
-        answer, data = command(args.command, payload=True)
-        if not answer.startswith("ok file"):
-            return say(answer)
-        print(data.decode("utf-8", "replace"))
-        return 0
-    if args.command == "df":
-        return fetch_text("df")
-    if args.command == "led":
-        return say(command("led " + " ".join(args.args))[0])
-    if args.command == "lightbar":
-        return say(command(f"lightbar {args.r} {args.g} {args.b}")[0])
-    if args.command == "keyboard":
-        spec = " ".join(args.spec)
-        return say(command(f"keyboard {args.action}" + (f" {spec}" if spec else ""))[0])
-    if args.command == "fan":
-        return say(command(f"fan set {args.temp}" if args.temp else "fan")[0])
-    if args.command == "beeper":
-        return say(command(("beeper " + " ".join(args.args)).strip())[0])
-    if args.command == "kill":
-        return say(command(f"kill {args.pid}")[0])
-    if args.command == "peek":
-        answer, data = command(f"peek {args.pid} {args.addr} {args.len}", payload=True)
-        if not answer.startswith("ok file"):
-            return say(answer)
-        print(data.hex())
-        print("ascii:", "".join(chr(b) if 32 <= b < 127 else "." for b in data))
-        return 0
-    if args.command == "poke":
-        return say(command(f"poke {args.pid} {args.addr} {args.hex}")[0])
-    if args.command in ("scan", "scan-aob"):
-        line = (f"scan {args.pid} {args.addr} {args.len} {args.width} {args.value}"
-                if args.command == "scan"
-                else f"scan-aob {args.pid} {args.addr} {args.len} {args.pattern}")
-        answer, data = command(line, timeout=120, payload=True)
-        if not answer.startswith("ok file"):
-            return say(answer)
-        print(answer.split("path=", 1)[1] if "path=" in answer else args.command)
-        sys.stdout.write(data.decode("utf-8", "replace"))
-        return 0
-    if args.command == "kern-read":
-        answer, data = command(f"kern-read {args.addr} {args.len}", payload=True)
-        if not answer.startswith("ok file"):
-            return say(answer)
-        print(data.hex())
-        print("ascii:", "".join(chr(b) if 32 <= b < 127 else "." for b in data))
-        return 0
-    if args.command == "kern-write":
-        return say(command(f"kern-write {args.addr} {args.hex}")[0])
-    if args.command == "klog-stream":
-        return klog_stream(args.ms)
-    if args.command == "discover":
-        return discover(args.timeout)
-    if args.command == "setting-set":
-        return say(command(f"setting-set {args.regid} {args.value}")[0])
-    if args.command == "settings":
-        answer, data = command("settings", timeout=120, payload=True)
-        if not answer.startswith("ok file"):
-            return say(answer)
-        out = Path(args.file) if args.file else ROOT / "downloads" / time.strftime(
-            "settings-%Y%m%d-%H%M%S.json")
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(data)
-        print(f"ok settings {len(data)} bytes -> {out}")
-        return 0
-    if args.command == "http":
-        answer, data = command(f"http {args.url}", timeout=60, payload=True)
-        if not answer.startswith("ok file"):
-            return say(answer)
-        out = ROOT / "downloads" / time.strftime("http-%Y%m%d-%H%M%S.txt")
-        out.parent.mkdir(parents=True, exist_ok=True)
-        out.write_bytes(data)
-        first = data.split(b"\r\n", 1)[0].decode("utf-8", "replace")
-        print(f"ok http {len(data)} bytes ({first}) -> {out}")
-        return 0
     if args.command == "press":
         return say(command(f"{pad_word(args)} tap {mask(args.buttons):x} {args.ms}")[0])
     if args.command == "hold":
         buttons = mask(args.buttons) if args.buttons else 0
         return say(command(f"{pad_word(args)} set {buttons:x} {args.lx} {args.ly} {args.rx} {args.ry} "
                            f"{args.l2} {args.r2}")[0])
-    if args.command == "release":
-        return say(command(f"{pad_word(args)} set 0 128 128 128 128 0 0")[0])
     line = {"ping": "ping", "list-captures": "list-captures", "status": f"{pad_word(args)} status",
             "close": "pad close all" if getattr(args, "all", False) else f"{pad_word(args)} close",
-            "pads": "pad list", "raw": " ".join(getattr(args, "words", []))}[args.command]
+            "pads": "pad list", "raw": " ".join(getattr(args, "words", [])),
+            "release": f"{pad_word(args)} set 0 128 128 128 128 0 0",
+            "delete-capture": f"delete-capture {getattr(args, 'path', '')}",
+            "rm": f"rm {getattr(args, 'path', '')}",
+            "mv": f"mv {getattr(args, 'src', '')} {getattr(args, 'dst', '')}",
+            "close-app": f"close-app {getattr(args, 'app_id', None) or ''}".strip(),
+            "kill": f"kill {getattr(args, 'pid', '')}",
+            "locate-title": "locate-title", "hwinfo": "hwinfo"}[args.command]
     return say(command(line)[0])
 
 

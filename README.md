@@ -6,6 +6,26 @@
 **Let an AI agent, or a script, drive a jailbroken PS5 by itself: press buttons,
 see the screen, repeat.**
 
+> [!IMPORTANT]
+> **This copy is set up for Playden compatibility testing.** `tools/playden.py`
+> adds the test around DevLoop's pad and screen: the 90-second watch, Playden's
+> logs (redacted), and a report folder per game with a draft for Playden's
+> test-report form. `AGENTS.md` is the tester's guide; `DEVLOOP.md` is DevLoop's
+> own. Below is DevLoop's README, cut to what this copy keeps, where
+> "`AGENTS.md`" means `DEVLOOP.md` here.
+>
+> **What was dropped.** The payload, its client (`tools/ps5loop.py`) and the
+> dashboard page here have only the commands that testing Playden games uses.
+> Gone from all three: `frame` (a Playden game cannot be given the hook),
+> `launch`, `install` and `uninstall` (PS5 packages; Playden's games go through
+> Playden), `rest`/`reboot`/`power-off`, `open-url`, `notify`, `trophy`, `led`,
+> `fan`, `beeper`, `lightbar`, `keyboard`, `hwdetail`, `display`,
+> `settings`/`setting-set`, `http`, `hash`, `exec`, and the memory tools (`peek`,
+> `poke`, `scan`, `scan-aob`, `kern-read`, `kern-write`, `module`, `modules`,
+> `dlsym`, `call`). The payload answers `err unknown` to them, so nothing here
+> can power the console off or write to memory. `build/ps5loop-devloop-full.elf`
+> is DevLoop's own payload, kept in case one of them is wanted back.
+
 > [!NOTE]
 > **This fork's changes are 100% vibecoded.** DevLoop itself is
 > [Gary Riches' project](https://github.com/griches/PS5_DevLoop); everything this
@@ -23,9 +43,9 @@ console, and one Python client:
 
 - **Input**: a system-wide virtual DualSense. The home screen and every title
   see a real controller.
-- **Sight**: the running title's own frame in about a second, or a screenshot of
-  the whole screen, system UI included, in about three. Both arrive as a small
-  PNG an agent can read, and neither leaves anything on the console.
+- **Sight**: a screenshot of the whole screen, system UI included, in about
+  three seconds. It arrives as a small PNG an agent can read, and leaves nothing
+  on the console.
 
 With those two, an agent can launch a port, walk its menus, notice what is
 wrong, change the code, and try again, with nobody at the pad.
@@ -34,9 +54,9 @@ wrong, change the code, and try again, with nobody at the pad.
 tools/ps5loop.py load                  # once per console boot
 tools/ps5loop.py open                  # connect the virtual controller
 tools/ps5loop.py seq l1 wait:1000 cross wait:14000    # Games tab, launch
-tools/ps5loop.py frame                 # the title's frame -> captures/capture-<time>.png
+tools/ps5loop.py screenshot            # the whole screen -> captures/capture-<time>.png
 tools/ps5loop.py seq down down cross:300 wait:1000
-tools/ps5loop.py screenshot            # the whole screen, for the home screen and dialogs
+tools/ps5loop.py screenshot
 tools/ps5loop.py close
 ```
 
@@ -51,9 +71,8 @@ home screen, every step checked from a picture.
 
 ## For agents
 
-`AGENTS.md` is the operating guide: the loop, which picture to take when, the
-rules that keep the console safe, and how to give a new title the `frame` hook
-(a few lines). `CLAUDE.md` includes it, so Claude Code reads it on entering the
+`AGENTS.md` is the tester's guide: one game from start to finish, how to reach
+a result, and the rules that keep the console safe. `CLAUDE.md` includes it, so Claude Code reads it on entering the
 folder. Point any other agent at it first.
 
 ## What you need
@@ -85,7 +104,6 @@ tools. The pad can launch anything from the home screen without them.
 | `press BUTTONS [--ms N]` | press and release: `cross`, `l1+r1` |
 | `hold BUTTONS [--lx N ...]` | hold buttons, sticks (0-255) and triggers until the next `hold` or `release` |
 | `seq STEPS...` | presses and waits in order: `down cross:300 wait:1000` |
-| `frame [FILE]` | the running title's frame (`--title`, from `titles.json`) |
 | `screenshot [FILE]` | the whole screen, through the console's screenshot |
 | `kernel-log [MS] [FILE]` | dump the console's kernel log (a bring-up aid) |
 | `delete-capture PATH` | remove a leftover capture through the gallery |
@@ -98,109 +116,26 @@ protocol (one text command per connection, port 9112).
 
 ## Controlling the console
 
-Beyond input and sight, the payload drives the console through its own services,
-run with the payload's credentials. Paths are the console's real paths; a shell
-that rewrites absolute paths (Git Bash on Windows) mangles them, so quote or
-disable that first.
+Beyond input and sight, the payload reads and changes the console through its
+own services. Paths are the console's real paths; a shell that rewrites absolute
+paths (Git Bash on Windows) mangles them, so quote or disable that first.
 
 | Command | What it does |
 | --- | --- |
-| `ps` | list every process, with the app id and title id of the apps |
+| `ps` | list every process, with the app id and title of the apps (on firmware 12.20 the title column shows only its number: `77031` for `FAKE77031`) |
+| `locate-title` | the foreground app's ids right now (app id, pid, title, command) |
+| `close-app [APP_ID]` | close a running app (id from `ps`, else the foreground one) |
+| `kill PID` | end a process (not just a registered app) |
 | `ls PATH` | list a console directory |
 | `get REMOTE [LOCAL]` | download a console file (default `downloads/<name>`) |
-| `hash PATH` | SHA-256 of a console file, computed on the console (hex) |
 | `put LOCAL REMOTE` | upload a local file to the console |
 | `rm PATH` / `mv SRC DST` | delete, move or rename a console file |
-| `open-url URL` | open a URL in the console's web browser |
-| `launch TITLE_ID` | launch a registered title |
-| `close-app [APP_ID]` | close a running app (id from `ps`, else the foreground one) |
-| `install /PATH.pkg` | install a `.pkg` already on the console |
-| `exec /PATH [ARGS]` | run a console binary and send back its output and exit code |
-| `wake` | wake the console from standby (UDP packet; needs `PS5_WAKE_CREDENTIAL`) |
-| `locate-title` | the foreground app's ids right now (app id, pid, title id, command) |
-| `module PID NAME` / `modules PID` / `dlsym PID NAME SYM` | a named module's mapping, every module in a process, or a symbol's address |
-| `rest` / `reboot` / `power-off` | rest mode, reboot, or power off |
-| `uninstall TITLE_ID` | uninstall a title |
-| `notify TYPE MESSAGE` | an on-screen message: `toast` (banner) or `flyout` (card) |
-| `trophy GRADE NAME[\|SUB]` | a notification in the system's trophy style: the overlay's own `InteractiveToastTrophy` template, the grade's artwork from `/system_ex/vsh_asset` (bronze, silver, gold, platinum) and its trophy sound. Only a notification: nothing is unlocked, recorded or synced |
-| `hwinfo` | model, serial, CPU temp, all 64 SoC sensors (incl. the hottest), CPU clock (and each core's, `sceKernelGetCpuCoreClock`), fan speed %, SoC power (mW, total and per rail), system version string, SoC id, CPU mode, core count, uptime |
-| `hwdetail` | JSON (also `GET /api/hwdetail`): the ICC's boot and shutdown counts, operating time, power-up cause, firmware ("Floyd") version, error log (records stamped in seconds since 2012-01-01) and system event log, the last boot's stage timestamps, the secure clock (`/dev/srtc`), USB and disc-drive power states, the SMU's clock table, the PCIe AER and GDDR6 error-rate counters, and system facts (ICC model, AMD part number, build number, budgets). Every read is a libkernel "get"; what is not decoded is sent as hex |
-| `display` | JSON (also `GET /api/display`): the HDMI sink's raw EDID (`sceVideoOutGetHdmiRawEdid_`, port 0x7000: byte 0 is the block count) and the system's 0x144-byte monitor-info record (`sceVideoOutGetHdmiMonitorInfo_`). The dashboard decodes the EDID: name, maker, preferred mode, video modes, HDMI 2.x (TMDS/FRL, VRR, ALLM, DSC), HDR and colorimetry, audio |
-| `thermal-probe` | bring-up: the raw readings libkernel's other thermal paths give (the ICC's `/dev/icc_thermal` byte, the `machdep.aeolia.alert.thermal` sysctl, the SMU's read-only getters), uninterpreted |
 | `df` | free space per mounted volume |
-| `led BWA` / `off` / `auto` / `breathe B W A [MS]` / `chase [MS]` | the console indicator LED (static, off, system-controlled, or an animated effect), via `/dev/icc_indicator` |
-| `fan [TEMP]` | read the fan duty, or set the manual threshold (30..90 °C), via `/dev/icc_fan` |
-| `fan hold TEMP [SECS]` / `off` | re-apply the threshold every `SECS` s (default 7) in a background thread — a one-shot `fan set` is reverted by the system, so hold keeps it pinned (idea from [owendswang/ps5-fan-control](https://github.com/owendswang/ps5-fan-control)) |
-| `beeper [PATTERN]` / `mute 0\|1` / `dim 0..2` / `status` | beep the console, set its mute or dim level, or read both back (`sceKernelIccSetBuzzer*`; the ICC's `0x4001950d`/`0x4001950f` getters). Dim is a byte the ICC interprets: by ear on a CFI-2015, 0 is the loudest and sounds like a different speaker, 1 and 2 are softer in the same tone; `vol` is an alias |
-| `kill PID` | end a process (not just a registered app) |
-| `peek PID ADDR LEN` / `poke PID ADDR HEX` | read / write a process's memory (writes are read back and verified) |
-| `scan PID ADDR LEN W VALUE` | find a `W`-byte integer (`W` = 1/2/4/8) in a span of a process's memory |
-| `scan-aob PID ADDR LEN PATTERN` | find a byte pattern (`??` = wildcard) in a span |
-| `kern-read ADDR LEN` / `kern-write ADDR HEX` | read / write kernel memory by absolute address (writes verified) |
+| `hwinfo` | model, firmware, CPU and SoC temperatures, CPU clock, fan speed, SoC power: what the console was doing while a game ran |
 | `klog-stream [MS]` | stream the kernel log live until you disconnect |
 | `discover [--timeout S]` | find consoles on the LAN by UDP broadcast to the command port |
-| `http URL` | fetch an `http://` URL (saved under `downloads/`) |
-| `settings` | read the system registry (settings) as JSON |
-| `setting-set REGID VALUE` | write one integer setting by its regId (read back and verified) |
-
-Verified on firmware 12.20: `ps`, `ls`/`get`/`put`/`rm`/`mv` (a round trip is
-byte-for-byte), `hash` (matches `sha256sum` for a 1 MB file and an empty file),
-`open-url`, `close-app`, `locate-title`, `module`/`modules`/`dlsym`, `call`
-(ptrace thread-hijack, proved against a disposable sleeper: `getpid`→its own pid,
-`abs(-5)`→5, target survived), `hwinfo`
-(all 64 SoC sensors answer), `df`, `led`/`fan`/`beeper` (ICC ioctls/calls return
-success, including the `breathe`/`chase`/`auto` effects and beeper `mute`/`dim`),
-`scan`/`scan-aob` (hit a known probe), `kern-read`/`kern-write` and `setting-set`
-(verified), `notify`, `peek`, `http`, the UDP beacon and `klog-stream`, and the
-console-hosted dashboard with its control panel (`GET /`, `GET /api/hwinfo`,
-`GET /api/hwdetail` and `GET /api/display` — the Hardware and Display sections — and
-`GET /api/run?c=CMD` — verified on 12.20 with `ping`, `hwinfo` and `ls`, and the
-`put`/`quit`/`klog-stream` exclusion refused with 400). `install` and `exec` are
-wired and fail gracefully on a missing target (a positive run needs a real
-`.pkg` / binary); `wake` and rest-mode survival are host/standby paths not
-exercised in this session.
-Notes and limits:
-
-- **`peek`** reads a process's memory; **`poke`** writes it. Writing the
-  payload's own process is refused by the kernel's self-write rule — `poke`
-  targets another process (a game), which is the point; verify it against a
-  running title. `ps` gives the pids. `plan.md` tracks what is next.
-- **`notify toast`** draws the small banner, **`notify flyout`** the larger
-  card. Both are drawn by the system, so they work from the payload. Modal
-  dialogs (message, error, on-screen keyboard) are not here: they render into
-  the calling app's own framebuffer, which a background payload does not have.
-- **`lightbar R G B`** attempts the *physical* DualSense lightbar as a
-  diagnostic. On 12.20 scePad initialises (`init=0`) but `scePadOpen` returns
-  `0x809b0081` (ALREADY_OPENED): SceShellUI owns the pad, so the payload cannot
-  set its lightbar/haptics. The console's own body LED (`led`, via
-  `/dev/icc_indicator`) is separate and does work.
-- **`keyboard [open|status|close]`** is a diagnostic in the same spirit: it
-  invokes the system on-screen keyboard (`sceImeDialog`) from the payload. On
-  12.20 `sceImeDialogInit` succeeds (`result=0`, status RUNNING) but the dialog
-  never draws — a modal CommonDialog renders into the *calling* app's framebuffer
-  and must be pumped from its render loop, which a background payload does not
-  have. (Borrowing the foreground app's identity with `sceKernelSetAppInfo` is
-  attempted too; it fails `0x80020010` and would not help regardless.) To put
-  text into a field, use the dashboard's **Type** box, which steers the game's
-  own keyboard key by key.
-- **`settings`** reads the registry by scanning regIds (`(cat << 24) | (sub <<
-  16) | entry`) with `sceRegMgrGetInt`/`GetStr`, keyed by regId in hex. It
-  covers the readable int and string values across every category; binary
-  entries and writing values are not included (a write needs a safe-key
-  allowlist — see `plan.md`).
-
-- **`launch`** uses `sceSystemServiceLaunchApp`, which takes titles registered in
-  the shell's app database. Homebrew launched by a loader or a launcher (the
-  `FAKE*` titles under `/data/homebrew`) are not registered and answer
-  `0x80940005`; a real installed title (a `PPSA*` id) launches.
-- **`rest` / `reboot` / `power-off` / `uninstall` are not reversible from here.**
-  They are implemented but were not triggered in testing (`off`/`reboot` end the
-  payload; `uninstall` removes a title). Power replies before it acts, since the
-  request may end the process first.
-- **Install a package** and **wake from standby** are not here yet: install needs
-  the app installer's full register-and-poll flow and a `.pkg` to build against;
-  wake is a host-side Remote Play packet that needs the console's pairing
-  credentials.
+| `wake` | wake the console from standby (UDP packet; needs `PS5_WAKE_CREDENTIAL`) |
+| `raw WORDS...` | send any command line to the payload as it is |
 
 ## Live dashboard
 
@@ -215,27 +150,21 @@ http://<console>:9112/api/run?c=CMD  # run any command, get its reply
 ```
 
 The top of the page is the live hardware view: the model, the CPU temperature
-and **every SoC sensor** (gauges, a grid of all readings, and a rolling chart of
-the CPU and **all 64 SoC sensors**), the CPU clock, and a **fan-speed gauge and
-rolling chart** (from `sceKernelGetCurrentFanDuty`, not the manual-duty ioctl,
-which reads 0 in auto mode). The charts share one time range, from 5 s to 1 h;
-on the 5 s and 30 s ranges the page samples every 0.5 s instead of every 2 s.
+and every SoC sensor, the CPU clock, the fan speed and SoC power, with rolling
+charts. It shows what the console is doing while a game runs.
 
-Below it is a control panel that drives **every function the payload has**
-— the virtual pad (open/close and each DualSense button), frame and screenshot
-(shown inline), `ps`/`ls`/`get`/`hash`/`rm`/`mv`, launch/close/uninstall/install,
-`open-url`, `notify`, the LED/fan/beeper, the memory and process tools
-(`peek`/`poke`/`scan`/`call`/`kern-*`/`modules`/`dlsym`), settings, `exec`, and
-power. Destructive actions (power, uninstall, install, `rm`, `poke`,
-`kern-write`, `kill`, `exec`, `setting-set`) ask for confirmation first. A raw
-command box runs anything verbatim.
+Below it is a control panel for what the payload has: the virtual pad
+(open/close, each DualSense button, the sticks and triggers, and a **Type** box
+that steers a game's on-screen keyboard key by key), screenshot and the
+captures gallery (shown inline), `ps`, `locate-title`, `df`, `hwinfo`,
+`close-app`, `kill`, the kernel log, and `ls`/`get`/`mv`/`rm`. `rm`, `kill`
+and deleting a capture ask first. A raw command box runs anything verbatim.
 
 Each control issues `GET /api/run?c=<command>`; the payload runs that command
-(the same dispatch the text protocol uses) and returns its reply — a picture for
-`frame`/`screenshot`, text otherwise. `put` (upload), `quit` and `klog-stream`
-are not offered over HTTP (they need a connection a browser cannot give); use the
-CLI for those. The payload has no authentication, so serve it only on a network
-you trust — the web panel exposes nothing the command port did not already.
+and returns its reply, a picture for `screenshot`, text otherwise. `put`
+(upload), `quit` and `klog-stream` are not offered over HTTP; use the CLI for
+those. The payload has no authentication, so serve it only on a network you
+trust.
 
 The page is embedded in the payload (`tools/ps5web.html` →
 `payload/dashboard_html.h`, regenerated by `tools/embed_dashboard.py`), so no
@@ -263,11 +192,6 @@ address to the browser.
 - **Input** is the system's virtual pad device (`scePadVirtualDevice*`, what
   Remote Play uses). The payload holds a state and inserts it every 8 ms;
   presses are timed on the console, not across the network.
-- **A title's frame** (`frame`) comes from the title. The payload creates a
-  request file in the title's folder; the title removes it and writes a picture
-  of its next frame; the payload sends that and deletes it. About 1 s end to end
-  at 3840x2160. A title needs a hook of a few lines (`AGENTS.md`, "Giving a
-  title a frame"), and an entry in `titles.json`.
 - **The whole screen** (`screenshot`) is the console's own screenshot: the payload
   holds the virtual Create button for 1.2 s, waits for the new file under
   `/user/av_contents/photo`, sends it, and deletes it through
@@ -297,16 +221,11 @@ Measured live. Firmware 12.20 and 13.60 behave the same unless noted.
 - Confirmed by picture, on the home screen and in a title's menus: Cross,
   Circle, the d-pad, L1, Create, PS. Not yet exercised: sticks, triggers,
   Options, the touchpad.
-- `sceScreenShotCapture` (libSceScreenShot), called from the payload, answers
-  "busy" until it is cancelled, with either type: no way round the Create hold
-  was found.
 - **Firmware 12.20**: the pad path above is identical, confirmed live (`add`
   `0x803b0006`, device id = `InsertData` handle, `bind` 0, input driving a
   homebrew launcher once the real pad is evicted). This console runs no klog
   server, so the payload reads `/dev/klog`; `screenshot`'s Create hold and its
-  `sceContentDeleteByPath` cleanup both work. The direct screenshot service
-  (`direct-screenshot`) answers `0x80be000a`, so as on 13.60 only the Create
-  hold works. Use `ps5loop.py kernel-log` to read the log where the server is absent.
+  `sceContentDeleteByPath` cleanup both work. Use `ps5loop.py kernel-log` to read the log where the server is absent.
 
 ## Limits
 

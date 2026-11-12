@@ -121,9 +121,7 @@
   /* one grid holds the control, hardware and display cards; a small label says which */
   .pcard[data-sec]::before { content: attr(data-sec); display: block; margin: -2px 0 4px; font-size: 10px;
     font-weight: 650; text-transform: uppercase; letter-spacing: .9px; color: var(--accent); }
-  .pcard[data-sec="Hardware"]::before { color: var(--cool); }
-  .pcard[data-sec="Display"]::before { color: var(--warm); }
-  .pcard h3 .mini { margin-left: 8px; vertical-align: 1px; }
+      .pcard h3 .mini { margin-left: 8px; vertical-align: 1px; }
   .pcard h3 .note { font-weight: 400; margin-left: 4px; }
   /* the console output stays the full width */
   .pcard.full { grid-column: 1 / -1; }
@@ -533,14 +531,11 @@
         <input type="range" id="kb-speed" min="0" max="100" value="50" aria-describedby="kb-speed-val">
         <b id="kb-speed-val"></b></div>
       <div class="hint" style="margin-bottom:0">Enter in the field types it (Enter again stops). Steers the keyboard's highlight key by key. Faster settings can drop presses if the console lags; slow down if letters go missing. It expects a keyboard that has just opened (highlight on G) with the English layout. Letters, digits, space and common symbols; no ~ or accents.</div>
-      <div class="row" style="margin-top:14px"><label>Keyboard</label>
-        <button title="Diagnostic (like Lightbar): invoke the system on-screen keyboard from the payload. sceImeDialogInit succeeds but it does not render — proof a modal dialog cannot be shown from a background payload" class="go" id="kb-invoke" onclick="probeKeyboard()">Probe keyboard dialog</button></div>
-      <div class="hint" style="margin-bottom:0">A diagnostic, not a control. It invokes <code>sceImeDialog</code> from the payload: the call succeeds (status RUNNING) but nothing draws, because a modal CommonDialog renders into the calling app's framebuffer, which a background payload lacks. To put text into a field, use the Type box above (it steers the game's own keyboard).</div>
     </div>
 
     <!-- sight -->
     <div data-sec="Control" class="pcard">
-      <h3>Sight <small>frame &amp; screenshot</small></h3>
+      <h3>Sight <small>screenshot</small></h3>
       <div class="row">
         <button title="Take the console&#x27;s own screenshot (holds Create 1.2 s, about 3 s): the whole screen, system UI included; the capture is deleted afterwards" class="go" onclick="run('screenshot')">Screenshot</button>
         <button title="Show the newest picture in the console&#x27;s captures, without pressing anything" onclick="run('latest-capture')">Latest capture</button>
@@ -548,13 +543,10 @@
       </div>
       <div class="hint">Screenshot needs the pad open (it holds Create). The whole screen; ~3 s. Pictures appear at the bottom of this card; HDR captures (JXR) are decoded in the page.</div>
       <div id="gallery" class="gallery"></div>
-      <div class="row"><label>Request</label><input id="fr-req" placeholder="/data/homebrew/PPSA.../devloop-shot"></div>
-      <div class="row"><label>Folder</label><input id="fr-dir" placeholder="/data/homebrew/PPSA.../screenshots"></div>
-      <div class="row"><button title="Ask the running title for its own frame (about 1 s; needs the title&#x27;s hook and a titles.json entry)" class="go wide" onclick="frame()">Frame (title's own)</button></div>
       <div id="shot"></div>
     </div>
 
-    <!-- apps -->
+<!-- apps -->
     <div data-sec="Control" class="pcard">
       <h3>Apps &amp; system</h3>
       <div class="row">
@@ -562,27 +554,13 @@
         <button title="Show the foreground app&#x27;s ids: app id, pid, title id" onclick="run('locate-title')">locate-title</button>
         <button title="Free space on each mounted volume" onclick="run('df')">df</button>
         <button title="One-line hardware reading: model, temperatures, clocks, fan, SoC power" onclick="run('hwinfo')">hwinfo</button>
-        <button title="Read the system registry (settings) as JSON" onclick="run('settings')">settings</button>
       </div>
-      <div class="row"><label>Launch</label><input id="app-launch" placeholder="PPSA00000">
-        <button title="Launch the installed title with this title id (registered titles, not homebrew run by a loader)" onclick="runIf('app-launch', id => 'launch ' + id)">Go</button></div>
       <div class="row"><label>Close</label><input id="app-close" placeholder="app id (blank = foreground)">
         <button title="Close the app with this app id (from ps); blank closes the foreground app" onclick="run('close-app ' + val('app-close'))">Go</button></div>
-      <div class="row"><label>URL</label><input id="app-url" placeholder="https://example.com">
-        <button title="Open this URL in the console&#x27;s web browser" onclick="runIf('app-url', u => 'open-url ' + u)">Open</button></div>
-      <div class="row"><label>Notify</label>
-        <select id="nt-type"><option value="toast">toast</option><option value="flyout">flyout</option></select>
-        <input id="nt-msg" placeholder="message">
-        <button title="Show this message on the console&#x27;s screen, as a toast (banner) or a flyout (card)" onclick="runIf('nt-msg', m => 'notify ' + val('nt-type') + ' ' + m)">Send</button></div>
-      <div class="row"><label>Trophy</label>
-        <select id="tr-grade" title="The trophy grade: its artwork, and platinum's own sound"><option value="bronze">bronze</option><option value="silver">silver</option><option value="gold" selected>gold</option><option value="platinum">platinum</option></select>
-        <input id="tr-name" placeholder="trophy name">
-        <input id="tr-sub" placeholder="subtitle (game)">
-        <button title="Show a notification in the console&#x27;s trophy style, with the grade&#x27;s artwork and sound; only a notification: nothing is unlocked or recorded" onclick="runIf('tr-name', n => 'trophy ' + val('tr-grade') + ' ' + n.replace(/\|/g, '/') + (val('tr-sub') ? '|' + val('tr-sub') : ''))">Send</button></div>
-      <div class="row"><label>Install</label><input id="app-pkg" placeholder="/path/to.pkg">
-        <button title="Install a .pkg file already on the console (asks first)" class="danger" onclick="runIf('app-pkg', p => 'install ' + p, 'Install this package?')">Install</button></div>
-      <div class="row"><label>Remove</label><input id="app-uninstall" placeholder="PPSA00000">
-        <button title="Uninstall the title with this id: removes it from the console and cannot be undone (asks first)" class="danger" onclick="runIf('app-uninstall', id => 'uninstall ' + id, 'Uninstall this title? This cannot be undone.')">Uninstall</button></div>
+      <div class="row"><label>kill</label><input id="m-kill" type="number" placeholder="pid">
+        <button title="End this process; unsaved work in it is lost (asks first)" class="danger" onclick="runIf('m-kill', p => 'kill ' + p, 'Kill that process?')">Kill</button></div>
+      <div class="row"><label>klog</label><input id="m-klog" type="number" value="1500" min="1" max="15000">
+        <button title="Capture the kernel log for this many milliseconds" onclick="run('kernel-log ' + val('m-klog'))">Dump</button></div>
     </div>
 
     <!-- files -->
@@ -592,8 +570,6 @@
         <button title="List this console folder" onclick="runIf('f-ls', p => 'ls ' + p)">List</button></div>
       <div class="row"><label>get</label><input id="f-get" placeholder="/path/to/file">
         <button title="Download this console file to your computer" onclick="getFile()">Download</button></div>
-      <div class="row"><label>hash</label><input id="f-hash" placeholder="/path/to/file">
-        <button title="SHA-256 of this console file, to check a transfer without downloading it" onclick="runIf('f-hash', p => 'hash ' + p)">SHA-256</button></div>
       <div class="row"><label>mv</label><input id="f-mv-a" placeholder="/from"><input id="f-mv-b" placeholder="/to">
         <button title="Move or rename a console file, from the first path to the second" onclick="run('mv ' + val('f-mv-a') + ' ' + val('f-mv-b'))">Move</button></div>
       <div class="row"><label>rm</label><input id="f-rm" placeholder="/path">
@@ -603,156 +579,6 @@
       <div class="hint">put (upload) is CLI-only. Downloads open in a new tab.</div>
     </div>
 
-    <!-- hardware -->
-    <div data-sec="Control" class="pcard">
-      <h3>Indicator LED, fan, beeper</h3>
-      <div class="row"><label>LED</label>
-        <span class="hint" style="margin:0">B/W/A 0–255</span>
-        <input type="number" id="led-b" value="0" min="0" max="255">
-        <input type="number" id="led-w" value="0" min="0" max="255">
-        <input type="number" id="led-a" value="0" min="0" max="255">
-        <button title="Hold the indicator light at these blue, white and amber levels (0-255)" onclick="run('led ' + val('led-b') + ' ' + val('led-w') + ' ' + val('led-a'))">Set</button></div>
-      <div class="row">
-        <button title="Turn the indicator light off" onclick="run('led off')">Off</button>
-        <button title="Give the indicator light back to the system" onclick="run('led auto')">Auto</button>
-        <button title="Pulse the indicator light slowly in these blue, white and amber levels" onclick="run('led breathe ' + val('led-b') + ' ' + val('led-w') + ' ' + val('led-a'))">Breathe</button>
-        <button title="Cycle the indicator light through its colours" onclick="run('led chase')">Chase</button>
-      </div>
-      <div class="row"><label>Fan</label>
-        <button title="Read the fan&#x27;s current duty" onclick="run('fan')">Read duty</button>
-        <input type="number" id="fan-t" value="60" min="30" max="90">
-        <button title="Set the fan&#x27;s manual threshold once (30-90 °C); the system soon reverts it, so use Hold to keep it" onclick="run('fan set ' + val('fan-t'))">Set °C</button></div>
-      <div class="row"><label>Hold</label>
-        <span class="hint" style="margin:0">every</span>
-        <input type="number" id="fan-secs" value="7" min="1" max="3600">
-        <span class="hint" style="margin:0">s</span>
-        <button title="Keep re-applying the fan threshold every so many seconds, so the system cannot revert it" class="go" onclick="run('fan hold ' + val('fan-t') + ' ' + val('fan-secs'))">Hold °C</button>
-        <button title="Stop holding the fan threshold; the system takes the fan back" onclick="run('fan hold off')">Stop</button>
-        <button title="Is the fan threshold being held, and at what" onclick="run('fan hold')">Status</button></div>
-      <div class="hint">Set °C is one-shot — the system reverts it. Hold re-applies the threshold every few seconds so it sticks.</div>
-      <div class="row"><label>Beeper</label>
-        <input type="number" id="beep-p" value="1" min="1" max="9">
-        <button title="Sound the console&#x27;s beeper with this pattern" onclick="run('beeper ' + val('beep-p'))">Beep</button>
-        <button title="Mute the console&#x27;s beeper (a lasting setting)" onclick="run('beeper mute 1')">Mute</button>
-        <button title="Unmute the console&#x27;s beeper" onclick="run('beeper mute 0')">Unmute</button>
-        <select id="beep-v" title="The beeper's dim level: 0 is the loudest (and sounds like a different speaker), 1 and 2 are softer"><option value="0">0 · full</option><option value="1">1 · soft</option><option value="2" selected>2 · softest</option></select>
-        <button title="Set the beeper's dim level (a lasting setting): 0 full, 1 soft, 2 softest" onclick="run('beeper dim ' + val('beep-v')).then(loadHardware)">Dim</button>
-        <span class="note" id="beep-now" title="The beeper settings the console holds now (read with the hardware cards)"></span></div>
-      <div class="row"><label>Lightbar</label>
-        <input type="number" id="lb-r" value="0" min="0" max="255">
-        <input type="number" id="lb-g" value="0" min="0" max="255">
-        <input type="number" id="lb-b" value="0" min="0" max="255">
-        <button title="Try to colour the real controller&#x27;s light bar (usually refused: the system owns the pad)" onclick="run('lightbar ' + val('lb-r') + ' ' + val('lb-g') + ' ' + val('lb-b'))">Try</button></div>
-      <div class="hint">Lightbar is a diagnostic: SceShellUI owns the pad, so it is expected to report ALREADY_OPENED.</div>
-    </div>
-
-    <!-- memory / process -->
-    <div data-sec="Control" class="pcard">
-      <h3>Process &amp; memory <small>advanced</small></h3>
-      <div class="row"><label>modules</label><input id="m-mods" placeholder="pid">
-        <button title="List every module loaded in this process (handle, base, entry)" onclick="runIf('m-mods', p => 'modules ' + p)">List</button></div>
-      <div class="row"><label>module</label><input id="m-mod-p" type="number" placeholder="pid"><input id="m-mod-n" placeholder="name">
-        <button title="Where this module is mapped in that process" onclick="run('module ' + val('m-mod-p') + ' ' + val('m-mod-n'))">Map</button></div>
-      <div class="row"><label>dlsym</label><input id="m-dl-p" type="number" placeholder="pid"><input id="m-dl-n" placeholder="module"><input id="m-dl-s" placeholder="symbol">
-        <button title="Resolve a symbol&#x27;s address in that process&#x27;s module" onclick="run('dlsym ' + val('m-dl-p') + ' ' + val('m-dl-n') + ' ' + val('m-dl-s'))">Resolve</button></div>
-      <div class="row"><label>call</label><input id="m-call" placeholder="pid addr [arg0..arg5]">
-        <button title="Call a function inside another process (up to 6 integer arguments) and show its return value; can crash that process (asks first)" class="danger" onclick="runIf('m-call', a => 'call ' + a, 'Call a function in that process?')">call</button></div>
-      <div class="row"><label>peek</label><input id="m-peek" placeholder="pid addr len">
-        <button title="Read bytes from a process&#x27;s memory" onclick="runIf('m-peek', a => 'peek ' + a)">Read</button></div>
-      <div class="row"><label>poke</label><input id="m-poke" placeholder="pid addr hex">
-        <button title="Write bytes into a process&#x27;s memory, read back to verify; a wrong address can crash it (asks first)" class="danger" onclick="runIf('m-poke', a => 'poke ' + a, 'Write that process memory?')">Write</button></div>
-      <div class="row"><label>scan</label><input id="m-scan" placeholder="pid addr len width value">
-        <button title="Search a span of a process&#x27;s memory for an integer of the given width" onclick="runIf('m-scan', a => 'scan ' + a)">int</button>
-        <input id="m-aob" placeholder="pid addr len pattern">
-        <button title="Search a span of a process&#x27;s memory for a byte pattern (?? matches any byte)" onclick="runIf('m-aob', a => 'scan-aob ' + a)">aob</button></div>
-      <div class="row"><label>kern</label><input id="m-kr" placeholder="addr len">
-        <button title="Read kernel memory at an absolute address" onclick="runIf('m-kr', a => 'kern-read ' + a)">read</button>
-        <input id="m-kw" placeholder="addr hex">
-        <button title="Write kernel memory at an absolute address, read back to verify; a wrong write can panic the console (asks first)" class="danger" onclick="runIf('m-kw', a => 'kern-write ' + a, 'Write kernel memory?')">write</button></div>
-      <div class="row"><label>exec</label><input id="m-exec" placeholder="/path [args]">
-        <button title="Run a binary on the console and show its output and exit code (asks first)" class="danger" onclick="runIf('m-exec', a => 'exec ' + a, 'Run that binary on the console?')">Run</button></div>
-      <div class="row"><label>kill</label><input id="m-kill" type="number" placeholder="pid">
-        <button title="End this process; unsaved work in it is lost (asks first)" class="danger" onclick="runIf('m-kill', p => 'kill ' + p, 'Kill that process?')">Kill</button></div>
-      <div class="row"><label>setting</label><input id="m-set" placeholder="regId value">
-        <button title="Write one integer system setting by its regId, read back to verify; a wrong value can misconfigure the console (asks first)" class="danger" onclick="runIf('m-set', a => 'setting-set ' + a, 'Write that system setting?')">setting-set</button></div>
-      <div class="row"><label>klog</label><input id="m-klog" type="number" value="1500" min="1" max="15000">
-        <button title="Capture the kernel log for this many milliseconds" onclick="run('kernel-log ' + val('m-klog'))">Dump</button>
-        <label>http</label><input id="m-http" placeholder="http://...">
-        <button title="Have the console fetch this http:// URL and show the response" onclick="runIf('m-http', u => 'http ' + u)">Fetch</button></div>
-    </div>
-
-    <!-- raw + power -->
-    <div data-sec="Control" class="pcard wide">
-      <h3>Power</h3>
-      <div class="row">
-        <button title="Put the console into rest mode; the payload keeps running (asks first)" class="danger" onclick="runIf(null, () => 'power rest', 'Put the console into rest mode?')">power rest</button>
-        <button title="Reboot the console: ends the payload, which must be loaded again (asks first)" class="danger" onclick="runIf(null, () => 'power reboot', 'Reboot the console?')">power reboot</button>
-        <button title="Power the console off; it cannot be woken from here (asks first)" class="danger" onclick="runIf(null, () => 'power off', 'Power the console off? It cannot be woken from here.')">power off</button>
-      </div>
-    </div>
-
-
-    <!-- hardware (GET /api/hwdetail) -->
-    <div data-sec="Hardware" class="pcard">
-      <h3>Power history <small>ICC counters</small>
-        <button class="mini" id="hw-refresh" title="Read the hardware cards again now (they also refresh every 15 s)">Refresh</button> <span class="note" id="hw-when"></span></h3>
-      <dl class="kv" id="hw-power"><dt>—</dt><dd></dd></dl>
-    </div>
-    <div data-sec="Hardware" class="pcard">
-      <h3>Identity <small>model, SoC, firmware</small></h3>
-      <dl class="kv" id="hw-ident"><dt>—</dt><dd></dd></dl>
-    </div>
-    <div data-sec="Hardware" class="pcard">
-      <h3>Devices <small>power states and fitted parts</small></h3>
-      <dl class="kv" id="hw-devices"><dt>—</dt><dd></dd></dl>
-    </div>
-    <div data-sec="Hardware" class="pcard">
-      <h3>Memory and buses <small>budgets, error counters</small></h3>
-      <dl class="kv" id="hw-memory"><dt>—</dt><dd></dd></dl>
-    </div>
-    <div data-sec="Hardware" class="pcard">
-      <h3>SoC clock table <small>SMU, MHz; field names not known</small></h3>
-      <div id="hw-clocks"><span class="note">—</span></div>
-    </div>
-    <div data-sec="Hardware" class="pcard">
-      <h3>Last boot <small>ICC stage timestamps</small></h3>
-      <div id="hw-boot"><span class="note">—</span></div>
-    </div>
-    <div data-sec="Hardware" class="pcard wide">
-      <h3>ICC error log <small>newest first; codes not decoded</small></h3>
-      <div class="scroll" id="hw-errlog"><span class="note">—</span></div>
-      <details><summary>System event log, raw counters</summary><div id="hw-raw"></div></details>
-    </div>
-
-    <!-- display (GET /api/display) -->
-    <div data-sec="Display" class="pcard">
-      <h3>Sink <small>from the EDID</small>
-        <button class="mini" id="dp-refresh" title="Read the display EDID and monitor info again (after changing TV or input)">Refresh</button></h3>
-      <dl class="kv" id="dp-sink"><dt>—</dt><dd></dd></dl>
-    </div>
-    <div data-sec="Display" class="pcard">
-      <h3>HDMI capabilities <small>CTA-861 extension</small></h3>
-      <dl class="kv" id="dp-hdmi"><dt>—</dt><dd></dd></dl>
-    </div>
-    <div data-sec="Display" class="pcard wide">
-      <h3>Video modes <small>blue = native</small></h3>
-      <div id="dp-modes"><span class="note">—</span></div>
-    </div>
-    <div data-sec="Display" class="pcard">
-      <h3>HDR and colour</h3>
-      <dl class="kv" id="dp-hdr"><dt>—</dt><dd></dd></dl>
-    </div>
-    <div data-sec="Display" class="pcard">
-      <h3>Audio</h3>
-      <div id="dp-audio"><span class="note">—</span></div>
-    </div>
-    <div data-sec="Display" class="pcard">
-      <h3>Raw <small>EDID and the system's monitor-info record</small></h3>
-      <div class="row" style="margin-top:0"><button title="Save the display&#x27;s EDID to your computer as edid.bin" class="mini" id="dp-save">Save EDID (.bin)</button>
-        <span class="note" id="dp-rc"></span></div>
-      <details><summary>EDID hex</summary><pre class="hexdump" id="dp-edid-hex"></pre></details>
-      <details><summary>Monitor-info record hex (0x144 bytes)</summary><pre class="hexdump" id="dp-mon-hex"></pre></details>
-    </div>
   </div>
 
   <footer>Polling the console every 2&nbsp;s · hardware info and control via the DevLoop payload</footer>
@@ -1726,42 +1552,6 @@ async function typeText() {
   }
 }
 
-// ---- keyboard dialog diagnostic ----
-// Like the Lightbar probe: invoke sceImeDialog from the payload, show that it
-// initialises but does not render, then tear it down. "keyboard open" starts the
-// dialog and reports result/host/borrow; "keyboard status" reports RUNNING;
-// "keyboard close" aborts and terms it.
-let keyboardProbing = false;
-async function probeKeyboard() {
-  if (keyboardProbing) return;
-  const ask = async cmd => (await (await fetch("/api/run?c=" + encodeURIComponent(cmd), { cache: "no-store" })).text()).trim();
-  const btn = document.getElementById("kb-invoke");
-  keyboardProbing = true; btn.disabled = true;
-  logLine("» keyboard probe (invoke sceImeDialog from the payload)", "cmd");
-  try {
-    const opened = await ask("keyboard open DevLoop keyboard probe");
-    logLine("  open: " + opened, /^ok\b/.test(opened) ? "ok" : "err");
-    if (!/^ok\b/.test(opened)) return;
-    await new Promise(done => setTimeout(done, 700));
-    const status = await ask("keyboard status");
-    logLine("  status: " + status, "ok");
-    logLine("  → sceImeDialogInit succeeded but the dialog does not render: a modal " +
-            "dialog needs the calling app's framebuffer, which a background payload lacks.", "ok");
-    const closed = await ask("keyboard close");
-    logLine("  close: " + closed, /^ok\b/.test(closed) ? "ok" : "err");
-  } catch (e) {
-    logLine("  → keyboard probe failed: " + e.message, "err");
-  } finally {
-    keyboardProbing = false; btn.disabled = false;
-  }
-}
-
-function frame() {
-  const req = val("fr-req"), dir = val("fr-dir");
-  if (!req || !dir) { logLine("  → frame needs both a request file and a folder", "err"); return; }
-  run("frame " + req + " " + dir);
-}
-
 // get: let the browser handle the download/preview in a new tab.
 function getFile() {
   const p = val("f-get");
@@ -1838,425 +1628,6 @@ function renderCores(list) {
     `<span class="core" title="core ${i}: ${v} MHz"><i style="--h:${Math.round(100 * v / coreScale)}%"></i>${i}</span>`).join("");
   box.title = "Per-core clock (SMU): " + list.join(" · ") + " MHz";
 }
-
-// ---- shared helpers for the hardware and display sections ----
-const SRTC_EPOCH = 1325376000; // the ICC counts seconds from 2012-01-01 UTC
-const hexBytes = h => {
-  const a = new Uint8Array((h || "").length >> 1);
-  for (let i = 0; i < a.length; i++) a[i] = parseInt(h.substr(i * 2, 2), 16);
-  return a;
-};
-const u32 = (b, o) => (b[o] | b[o + 1] << 8 | b[o + 2] << 16 | b[o + 3] << 24) >>> 0;
-const hx = (v, w) => v == null ? "—" : "0x" + (Number(v) >>> 0).toString(16).padStart(w || 0, "0");
-const txt = v => v == null || v === "" ? "—" : esc(String(v));
-const flag = (v, on, off) => v == null ? "—"
-  : v ? `<span class="tag on">${on || "yes"}</span>` : `<span class="tag off">${off || "no"}</span>`;
-const mib = v => v == null ? "—" : (v / 1048576).toFixed(v >= 1073741824 ? 0 : 1) + " MiB";
-const when = unix => unix ? new Date(unix * 1000).toLocaleString() : "—";
-function kv(id, rows) {
-  const html = rows.filter(Boolean).map(([k, v, title]) =>
-    `<dt>${esc(k)}</dt><dd${title ? ` title="${esc(title)}"` : ""}>${v}</dd>`).join("");
-  document.getElementById(id).innerHTML = html || "<dt>—</dt><dd></dd>";
-}
-function hexdump(b) {
-  const lines = [];
-  for (let o = 0; o < b.length; o += 16) {
-    const row = Array.from(b.slice(o, o + 16), x => x.toString(16).padStart(2, "0")).join(" ");
-    const asc = Array.from(b.slice(o, o + 16), x => x >= 32 && x < 127 ? String.fromCharCode(x) : ".").join("");
-    lines.push(o.toString(16).padStart(4, "0") + "  " + row.padEnd(48) + "  " + asc);
-  }
-  return lines.join("\n");
-}
-const rawBlock = (title, h) => h ? `<div class="note" style="margin-top:8px">${esc(title)}</div><pre class="hexdump">${esc(hexdump(hexBytes(h)))}</pre>` : "";
-
-// ---- hardware: GET /api/hwdetail (ICC counters and logs, SMU clocks, system facts) ----
-const BEEP_DIM = ["full", "soft", "softest"];
-function renderHardware(d) {
-  const open = d.boots != null && d.shutdowns != null ? d.boots - d.shutdowns : null;
-  const drift = d.srtc && d.now ? d.srtc - d.now : null;
-  kv("hw-power", [
-    ["Boots", txt(d.boots)],
-    ["Shutdowns", txt(d.shutdowns)],
-    open != null && ["Boots without a shutdown", txt(open) + ` <small>(the running session is one)</small>`],
-    ["Operating time", d.opTime == null ? "—" : `${fmtUptime(d.opTime)} <small>if seconds (raw ${d.opTime}); saved at shutdown</small>`],
-    ["Power-up cause", d.upCause ? `<code>${esc(d.upCause.match(/../g).join(" "))}</code> <small>undecoded</small>` : "—",
-      "icc_power 0xc0099902 (9 bytes) and 0x40019907 = " + d.upCause2],
-    ["Boot requests", txt(d.bootReqCount)],
-    ["Secure clock", d.srtc ? `${when(d.srtc)}` + (drift != null ? ` <small>(${drift >= 0 ? "+" : ""}${drift} s vs system)</small>` : "") : "—",
-      "/dev/srtc, seconds since 2012-01-01"],
-  ]);
-  const floyd = d.floyd ? d.floyd.match(/../g).join(" ") : null;
-  kv("hw-ident", [
-    ["ICC model", txt(d.hwModel)],
-    ["Processor", txt(d.processor), "kern.processor_name_id (AMD part number)"],
-    ["ICC firmware", floyd ? `<code>${esc(floyd)}</code>` : "—", "icc_floyd 0x400eb701, 14 bytes"],
-    ["Kernel build", d.buildnum == null ? "—" : `${d.buildnum} <small>${hx(d.buildnum)}</small>`],
-    ["Subsystem id", hx(d.subsysId, 8)],
-    ["Product shape", txt(d.productShape), "hw.config.product_shape"],
-    ["Special model", txt(d.specialModel)],
-    ["TSC", d.tscHz ? (d.tscHz / 1e6).toFixed(3) + " MHz" : "—"],
-    ["Neo mode", txt(d.neomode)],
-    ["Game CPU mode", txt(d.cpumodeGame)],
-    ["Last resume type", txt(d.resumeType)],
-  ]);
-  kv("hw-devices", [
-    ["USB power", flag(d.usbPower, "on", "off")],
-    ["Disc drive fitted", flag(d.bdDrive)],
-    ["Disc drive power", flag(d.bdPower, "on", "off")],
-    ["Disc chucking", txt(d.bdChucking), "icc_configuration 0x40019209"],
-    ["Disc drive regs", [d.bd401, d.bd402, d.bd404].map(v => hx(v)).join(" · "), "icc_bddrive c401 (2 B) · c402 (4 B) · c404 (1 B), undecoded"],
-    ["M.2 SSD", flag(d.m2Attached, "fitted", "empty")],
-    ["Optical audio out", flag(d.opticalOut)],
-    ["HDD/SSD flag", txt(d.hddssd)],
-    ["Eco charge", flag(d.ecoCharge, "available", "no")],
-    ["ICC thermal byte", d.iccThermal == null ? "—" : `${d.iccThermal} <small>constant under load: likely intake °C</small>`],
-    ["Thermal alert", flag(d.thermalAlert, "ALERT", "none")],
-    ["ICC HDMI · crash", `${txt(d.iccHdmi)} · ${txt(d.iccCrash)}`, "icc_hdmi 0x4001c301 · icc_crash_report 0x4001c101"],
-    ["CPU info bit · EMC BT", `${hx(d.cpuInfoBit)} · ${hx(d.emcBt)}`],
-    ["Beeper", d.beeperDim == null ? "—" : `${BEEP_DIM[d.beeperDim] || "dim " + d.beeperDim}${d.beeperOff ? " · <b>muted</b>" : ""}`,
-      "the ICC's buzzer settings: dim (0 full, 1 soft, 2 softest) and off"],
-  ]);
-  const now = document.getElementById("beep-now");
-  if (now) now.textContent = d.beeperDim == null ? "" : "now " + (BEEP_DIM[d.beeperDim] || "dim " + d.beeperDim) + (d.beeperOff ? ", muted" : "");
-  const aer = d.pciAer ? hexBytes(d.pciAer) : null;
-  const aerWords = aer ? Array.from({ length: aer.length >> 2 }, (_, i) => u32(aer, i * 4)) : null;
-  const umc = d.umcErate ? hexBytes(d.umcErate) : null;
-  const umcNonZero = umc ? umc.reduce((n, x) => n + (x ? 1 : 0), 0) : null;
-  kv("hw-memory", [
-    ["Kernel heap", d.kernHeap == null ? "—" : `${d.kernHeap} <small>vm.kern_heap_size; unit not known (KiB fits)</small>`],
-    ["mlock budget", d.mlockTotal == null ? "—" : `${mib(d.mlockAvail)} free of ${mib(d.mlockTotal)}`],
-    ["Available pages", txt(d.availPages)],
-    ["PCIe AER", aerWords ? `${aerWords[0]} <small>first word; others ${aerWords.slice(1).some(Boolean) ? aerWords.slice(1).join(",") : "zero"}</small>` : "—",
-      "hw.pcist.get_pci_aer (" + (aer ? aer.length : 0) + " bytes); likely an error count"],
-    ["GDDR6 error rate", umc ? (umcNonZero ? `<span class="tag on" style="border-color:var(--warm);color:var(--warm)">${umcNonZero} non-zero bytes</span>` : `<span class="tag on">all zero</span>`) : "—",
-      "hw.umc.get_erate_in_game (" + (umc ? umc.length : 0) + " bytes)"],
-  ]);
-  const clocks = document.getElementById("hw-clocks");
-  clocks.innerHTML = Array.isArray(d.socClock)
-    ? d.socClock.map((v, i) => `<span class="tag${v === 2230 ? " on" : ""}" title="word ${i}${v === 2230 ? " (the GPU's max clock)" : ""}">#${i} <b>${v}</b></span>`).join("")
-    : '<span class="note">unavailable</span>';
-  renderBoot(d.bootTimes);
-  renderErrLog(d.errLog);
-  document.getElementById("hw-raw").innerHTML =
-    rawBlock("machdep.icc.sys_event_log", d.sysEventLog) + rawBlock("machdep.icc.count_time", d.countTime) +
-    rawBlock("hw.pcist.get_pci_aer", d.pciAer) + rawBlock("hw.umc.get_erate_in_game", d.umcErate);
-}
-
-function renderBoot(list) {
-  const box = document.getElementById("hw-boot");
-  if (!Array.isArray(list)) { box.innerHTML = '<span class="note">unavailable</span>'; return; }
-  const stages = list.map((v, i) => ({ i, v })).filter(s => s.v);
-  if (!stages.length) { box.innerHTML = '<span class="note">no stages recorded</span>'; return; }
-  const max = Math.max(...stages.map(s => s.v));
-  box.innerHTML =
-    `<div class="stages">${stages.map(s => `<i style="left:${(100 * s.v / max).toFixed(2)}%" title="stage ${s.i}: ${s.v}"></i>`).join("")}</div>` +
-    `<div class="stages-axis"><span>0</span><span>${stages.length} stages · last at ${max} <small>(likely ms: ${(max / 1000).toFixed(1)} s)</small></span></div>` +
-    `<details><summary>Every stage</summary><div style="margin-top:6px">${stages.map(s => `<span class="tag">#${s.i} <b>${s.v}</b></span>`).join("")}</div></details>`;
-}
-
-// machdep.icc.err_log: a 4-byte header, then 32-byte records { u32 code; u32
-// seconds since 2012; 6 more words }. Empty records are zero.
-function renderErrLog(h) {
-  const box = document.getElementById("hw-errlog");
-  if (!h) { box.innerHTML = '<span class="note">unavailable</span>'; return; }
-  const b = hexBytes(h);
-  const rows = [];
-  for (let o = 4; o + 32 <= b.length; o += 32) {
-    const rec = b.slice(o, o + 32);
-    if (!rec.some(Boolean)) continue;
-    const words = Array.from({ length: 8 }, (_, i) => u32(rec, i * 4));
-    rows.push({ slot: (o - 4) / 32, code: words[0], t: words[1], rest: words.slice(2) });
-  }
-  rows.sort((a, c) => c.t - a.t);
-  box.innerHTML = rows.length
-    ? `<div class="note">${rows.length} record${rows.length === 1 ? "" : "s"} · header ${esc(h.slice(0, 8))}</div>` +
-      `<table class="log"><tr><th>When</th><th>Code</th><th>Slot</th><th>Words 2–7</th></tr>` +
-      rows.map(r => `<tr><td>${when(r.t + SRTC_EPOCH)}</td><td><code>${hx(r.code, 8)}</code></td><td>${r.slot}</td>` +
-        `<td class="raw">${r.rest.map(w => w.toString(16).padStart(8, "0")).join(" ")}</td></tr>`).join("") + `</table>`
-    : '<span class="note">empty</span>';
-}
-
-let hwBusy = false;
-async function loadHardware() {
-  if (hwBusy) return;
-  hwBusy = true;
-  try {
-    const r = await fetch("/api/hwdetail", { cache: "no-store" });
-    const d = await r.json();
-    if (!d.ok) throw new Error(d.error || "error");
-    renderHardware(d);
-    document.getElementById("hw-when").textContent = "read " + new Date().toLocaleTimeString();
-  } catch (e) {
-    document.getElementById("hw-when").textContent = "unavailable (" + e.message + "); an older payload has no /api/hwdetail";
-  } finally {
-    hwBusy = false;
-  }
-}
-document.getElementById("hw-refresh").onclick = loadHardware;
-
-// ---- display: GET /api/display (the HDMI sink's EDID, decoded here) ----
-const VIC = (() => {
-  const t = [];
-  const put = (start, list) => list.forEach((v, i) => { t[start + i] = v; });
-  const rates = (res, list, suffix) => list.map(r => res + "p" + r + (suffix || ""));
-  put(1, ["640x480p60", "720x480p60 4:3", "720x480p60", "1280x720p60", "1920x1080i60", "720x480i60 4:3", "720x480i60",
-    "720x240p60 4:3", "720x240p60", "2880x480i60 4:3", "2880x480i60", "2880x240p60 4:3", "2880x240p60", "1440x480p60 4:3",
-    "1440x480p60", "1920x1080p60", "720x576p50 4:3", "720x576p50", "1280x720p50", "1920x1080i50", "720x576i50 4:3",
-    "720x576i50", "720x288p50 4:3", "720x288p50", "2880x576i50 4:3", "2880x576i50", "2880x288p50 4:3", "2880x288p50",
-    "1440x576p50 4:3", "1440x576p50", "1920x1080p50", "1920x1080p24", "1920x1080p25", "1920x1080p30", "2880x480p60 4:3",
-    "2880x480p60", "2880x576p50 4:3", "2880x576p50", "1920x1080i50 (1250)", "1920x1080i100", "1280x720p100",
-    "720x576p100 4:3", "720x576p100", "720x576i100 4:3", "720x576i100", "1920x1080i120", "1280x720p120", "720x480p120 4:3",
-    "720x480p120", "720x480i120 4:3", "720x480i120", "720x576p200 4:3", "720x576p200", "720x576i200 4:3", "720x576i200",
-    "720x480p240 4:3", "720x480p240", "720x480i240 4:3", "720x480i240", "1280x720p24", "1280x720p25", "1280x720p30",
-    "1920x1080p120", "1920x1080p100"]);
-  put(65, rates("1280x720", [24, 25, 30, 50, 60, 100, 120], " 64:27"));
-  put(72, rates("1920x1080", [24, 25, 30, 50, 60, 100, 120], " 64:27"));
-  put(79, rates("1680x720", [24, 25, 30, 50, 60, 100, 120]));
-  put(86, rates("2560x1080", [24, 25, 30, 50, 60, 100, 120]));
-  put(93, rates("3840x2160", [24, 25, 30, 50, 60]));
-  put(98, rates("4096x2160", [24, 25, 30, 50, 60]));
-  put(103, rates("3840x2160", [24, 25, 30, 50, 60], " 64:27"));
-  put(108, ["1280x720p48", "1280x720p48 64:27", "1680x720p48", "1920x1080p48", "1920x1080p48 64:27", "2560x1080p48",
-    "3840x2160p48", "4096x2160p48", "3840x2160p48 64:27", "3840x2160p100", "3840x2160p120", "3840x2160p100 64:27",
-    "3840x2160p120 64:27"]);
-  put(121, rates("5120x2160", [24, 25, 30, 48, 50, 60, 100]));
-  put(193, ["5120x2160p120"]);
-  put(194, rates("7680x4320", [24, 25, 30, 48, 50, 60, 100, 120]));
-  put(202, rates("7680x4320", [24, 25, 30, 48, 50, 60, 100, 120], " 64:27"));
-  put(210, rates("10240x4320", [24, 25, 30, 48, 50, 60, 100, 120]));
-  put(218, ["4096x2160p100", "4096x2160p120"]);
-  return t;
-})();
-const AUDIO_FMT = ["?", "LPCM", "AC-3", "MPEG-1", "MP3", "MPEG-2", "AAC LC", "DTS", "ATRAC", "DSD", "E-AC-3 (DD+)",
-  "DTS-HD", "MAT (TrueHD/Atmos)", "DST", "WMA Pro", "extended"];
-const AUDIO_RATES = [32, 44.1, 48, 88.2, 96, 176.4, 192];
-const SPEAKERS = ["FL/FR", "LFE", "FC", "BL/BR", "BC", "FLC/FRC", "RLC/RRC", "FLW/FRW"];
-const FRL = ["none", "3 Gbps × 3", "6 Gbps × 3", "6 Gbps × 4", "8 Gbps × 4", "10 Gbps × 4", "12 Gbps × 4"];
-const FRL_GBPS = [0, 9, 18, 24, 32, 40, 48];
-
-function svd(byte) {
-  if (byte >= 129 && byte <= 192) return { vic: byte & 0x7f, native: true };
-  return { vic: byte, native: false };
-}
-
-function dtd(b, o) {
-  const clk = (b[o] | b[o + 1] << 8) * 10; // kHz
-  const ha = b[o + 2] | (b[o + 4] & 0xf0) << 4, hb = b[o + 3] | (b[o + 4] & 0x0f) << 8;
-  const va = b[o + 5] | (b[o + 7] & 0xf0) << 4, vb = b[o + 6] | (b[o + 7] & 0x0f) << 8;
-  const il = (b[o + 17] & 0x80) !== 0;
-  const hz = clk * 1000 / ((ha + hb) * (va + vb)) * (il ? 2 : 1);
-  return { w: ha, h: il ? va * 2 : va, hz, il, mhz: clk / 1000 };
-}
-const dtdName = t => `${t.w}x${t.h}${t.il ? "i" : "p"}${t.hz.toFixed(t.hz % 1 > 0.05 && t.hz % 1 < 0.95 ? 2 : 0)}`;
-
-function parseEdid(b) {
-  if (b.length < 128 || u32(b, 0) !== 0xffffff00 || u32(b, 4) !== 0x00ffffff) return null;
-  const e = { modes: [], dtds: [], audio: [], speakers: [], y420: [], hdmi: null, hf: null, hdr: null, color: [], vsvdb: [] };
-  const w = b[8] << 8 | b[9];
-  e.maker = String.fromCharCode(64 + (w >> 10 & 31), 64 + (w >> 5 & 31), 64 + (w & 31));
-  e.product = b[10] | b[11] << 8;
-  e.serial = u32(b, 12);
-  e.week = b[16]; e.year = b[17] + 1990;
-  e.version = b[18] + "." + b[19];
-  e.digital = (b[20] & 0x80) !== 0;
-  if (e.digital && b[19] >= 4) {
-    e.depth = [null, 6, 8, 10, 12, 14, 16][b[20] >> 4 & 7];
-    e.iface = [null, "DVI", "HDMI-a", "HDMI-b", "MDDI", "DisplayPort"][b[20] & 15];
-  }
-  e.cm = [b[21], b[22]];
-  e.gamma = b[23] === 0xff ? null : (b[23] + 100) / 100;
-  for (const o of [54, 72, 90, 108]) {
-    if (b[o] | b[o + 1]) { e.dtds.push(dtd(b, o)); continue; }
-    const tag = b[o + 3];
-    const text = () => String.fromCharCode(...b.slice(o + 5, o + 18)).split("\n")[0].trim();
-    if (tag === 0xfc) e.name = text();
-    else if (tag === 0xff) e.serialText = text();
-    else if (tag === 0xfe) e.text = text();
-    else if (tag === 0xfd) {
-      const f = b[o + 4];
-      e.range = { vmin: b[o + 5] + (f & 1 ? 255 : 0), vmax: b[o + 6] + (f & 2 ? 255 : 0),
-        hmin: b[o + 7] + (f & 4 ? 255 : 0), hmax: b[o + 8] + (f & 8 ? 255 : 0), clk: b[o + 9] * 10 };
-    }
-  }
-  e.extensions = b[126];
-  for (let x = 128; x + 128 <= b.length; x += 128) {
-    if (b[x] !== 0x02) continue; // only CTA-861 extensions are decoded
-    e.cta = { rev: b[x + 1], underscan: !!(b[x + 3] & 0x80), basicAudio: !!(b[x + 3] & 0x40),
-      ycc444: !!(b[x + 3] & 0x20), ycc422: !!(b[x + 3] & 0x10) };
-    const end = x + b[x + 2];
-    for (let i = x + 4; i < end && i < x + 127;) {
-      const tag = b[i] >> 5, len = b[i] & 31, p = i + 1;
-      if (tag === 1) {
-        for (let k = p; k + 3 <= p + len; k += 3) {
-          const fmt = b[k] >> 3 & 15;
-          const rates = AUDIO_RATES.filter((_, j) => b[k + 1] & 1 << j);
-          const extra = fmt === 1 ? [16, 20, 24].filter((_, j) => b[k + 2] & 1 << j).join("/") + "-bit"
-            : fmt >= 2 && fmt <= 8 ? `≤${b[k + 2] * 8} kbps` : "";
-          e.audio.push({ fmt: AUDIO_FMT[fmt], ch: (b[k] & 7) + 1, rates, extra });
-        }
-      } else if (tag === 2) {
-        for (let k = p; k < p + len; k++) e.modes.push(svd(b[k]));
-      } else if (tag === 3) {
-        const oui = b[p] | b[p + 1] << 8 | b[p + 2] << 16;
-        if (oui === 0x000c03) {
-          e.hdmi = { addr: [b[p + 3] >> 4, b[p + 3] & 15, b[p + 4] >> 4, b[p + 4] & 15].join("."),
-            dc: len >= 6 ? [[0x40, 48], [0x20, 36], [0x10, 30]].filter(([m]) => b[p + 5] & m).map(([, v]) => v) : [],
-            y444dc: len >= 6 && !!(b[p + 5] & 0x08), ai: len >= 6 && !!(b[p + 5] & 0x80),
-            tmds: len >= 7 ? b[p + 6] * 5 : null };
-        } else if (oui === 0xc45dd8) {
-          e.hf = parseHf(b, p + 3, p + len);
-        }
-      } else if (tag === 4) {
-        e.speakers = SPEAKERS.filter((_, j) => b[p] & 1 << j);
-      } else if (tag === 7) {
-        const ext = b[p], q = p + 1, n = len - 1;
-        if (ext === 0) e.vcap = { qy: !!(b[q] & 0x80), qs: !!(b[q] & 0x40) };
-        else if (ext === 1) {
-          const oui = b[q] | b[q + 1] << 8 | b[q + 2] << 16;
-          e.vsvdb.push(oui === 0x00d046 ? "Dolby Vision" : oui === 0x90848b ? "HDR10+" : hx(oui, 6));
-        } else if (ext === 5) {
-          const names = ["xvYCC601", "xvYCC709", "sYCC601", "opYCC601", "opRGB", "BT2020 cYCC", "BT2020 YCC", "BT2020 RGB"];
-          e.color = names.filter((_, j) => b[q] & 1 << j);
-          if (n >= 2 && b[q + 1] & 0x80) e.color.push("DCI-P3");
-        } else if (ext === 6) {
-          const eotf = ["SDR", "HDR (gamma)", "HDR10 (PQ)", "HLG"].filter((_, j) => b[q] & 1 << j);
-          const maxL = n >= 3 && b[q + 2] ? 50 * Math.pow(2, b[q + 2] / 32) : null;
-          const avgL = n >= 4 && b[q + 3] ? 50 * Math.pow(2, b[q + 3] / 32) : null;
-          const minL = n >= 5 && maxL ? maxL * Math.pow(b[q + 4] / 255, 2) / 100 : null;
-          e.hdr = { eotf, maxL, avgL, minL };
-        } else if (ext === 7) e.hdrDynamic = true;
-        else if (ext === 14) for (let k = q; k < p + 1 + n; k++) e.y420.push(svd(b[k]).vic);
-        else if (ext === 15) e.y420map = true;
-        else if (ext === 0x79) e.hf = parseHf(b, q + 2, p + len); // HF-SCDB: as the HF-VSDB, after 2 bytes
-      }
-      i = p + len;
-    }
-    for (let o = end; o + 18 <= x + 127 && (b[o] | b[o + 1]); o += 18) e.dtds.push(dtd(b, o));
-  }
-  return e;
-}
-
-// The HDMI Forum block (HF-VSDB / HF-SCDB): s is the version byte, end the block end.
-function parseHf(b, s, end) {
-  const n = end - s;
-  const hf = { version: b[s], tmds: b[s + 1] ? b[s + 1] * 5 : null,
-    scdc: !!(b[s + 2] & 0x80), rr: !!(b[s + 2] & 0x40), scramble340: !!(b[s + 2] & 0x08),
-    frl: n > 3 ? b[s + 3] >> 4 : 0, dc420: n > 3 ? [[4, 48], [2, 36], [1, 30]].filter(([m]) => b[s + 3] & m).map(([, v]) => v) : [] };
-  if (n > 4) { hf.allm = !!(b[s + 4] & 0x02); hf.fva = !!(b[s + 4] & 0x04); hf.qms = !!(b[s + 4] & 0x40); }
-  if (n > 6) {
-    hf.vrrMin = b[s + 5] & 0x3f;
-    hf.vrrMax = (b[s + 5] & 0xc0) << 2 | b[s + 6];
-  }
-  if (n > 7) hf.dsc = !!(b[s + 7] & 0x80);
-  return hf;
-}
-
-let edidBytes = null;
-function renderDisplay(d) {
-  const rc = [];
-  if (d.edidRc) rc.push("EDID " + d.edidRc);
-  if (d.monitorRc) rc.push("monitor info " + d.monitorRc);
-  document.getElementById("dp-rc").textContent = rc.join(" · ") + (d.port ? " · port " + d.port : "");
-  const raw = d.edid ? hexBytes(d.edid) : null;
-  // byte 0 is the number of 128-byte blocks the library filled
-  edidBytes = raw && raw[0] ? raw.slice(1, 1 + Math.min(raw[0], 4) * 128) : null;
-  const mon = d.monitor ? hexBytes(d.monitor) : null;
-  document.getElementById("dp-edid-hex").textContent = edidBytes ? hexdump(edidBytes) : "—";
-  document.getElementById("dp-mon-hex").textContent = mon ? hexdump(mon) : "—";
-  const e = edidBytes ? parseEdid(edidBytes) : null;
-  if (!e) {
-    kv("dp-sink", [["EDID", d.edid ? "not a valid EDID" : "none (no HDMI sink, or the call failed)"]]);
-    kv("dp-hdmi", []); kv("dp-hdr", []);
-    document.getElementById("dp-modes").innerHTML = '<span class="note">—</span>';
-    document.getElementById("dp-audio").innerHTML = '<span class="note">—</span>';
-    return;
-  }
-  const pref = e.dtds[0];
-  const inches = e.cm[0] && e.cm[1] ? Math.hypot(e.cm[0], e.cm[1]) / 2.54 : null;
-  kv("dp-sink", [
-    ["Name", txt(e.name)],
-    ["Maker", `${esc(e.maker)} <small>product ${hx(e.product, 4)}</small>`],
-    ["Made", e.week === 0xff ? `model year ${e.year}` : e.week ? `week ${e.week}, ${e.year}` : String(e.year)],
-    ["EDID", `${esc(e.version)}` + (e.cta ? ` <small>+ CTA-861 rev ${e.cta.rev}, ${e.extensions} extension${e.extensions === 1 ? "" : "s"}</small>` : "")],
-    ["Input", e.digital ? "digital" + (e.iface ? " · " + e.iface : "") + (e.depth ? ` · ${e.depth}-bit` : "") : "analogue"],
-    ["Screen size", e.cm[0] && e.cm[1] ? `${e.cm[0]} × ${e.cm[1]} cm <small>(${inches.toFixed(0)}″)</small>` : "not given"],
-    ["Preferred mode", pref ? `${dtdName(pref)} <small>${pref.mhz.toFixed(2)} MHz pixel clock</small>` : "—"],
-    e.range && ["Range limits", `${e.range.vmin}–${e.range.vmax} Hz V · ${e.range.hmin}–${e.range.hmax} kHz H · ≤${e.range.clk} MHz`],
-    ["Serial", e.serial || e.serialText ? "reported <small>(not shown)</small>" : "none"],
-    e.gamma && ["Gamma", e.gamma.toFixed(2)],
-  ]);
-  const hdmi = e.hdmi, hf = e.hf;
-  kv("dp-hdmi", [
-    ["HDMI VSDB", hdmi ? `physical address ${esc(hdmi.addr)}` : "none <small>(DVI sink?)</small>"],
-    hdmi && ["Max TMDS", hdmi.tmds ? hdmi.tmds + " MHz" : "—"],
-    hdmi && ["Deep colour", hdmi.dc.length ? hdmi.dc.map(v => v + "-bit").join(", ") + (hdmi.y444dc ? " (also 4:4:4)" : "") : "none"],
-    ["HDMI 2.x (HF)", hf ? `version ${hf.version}` + (hf.tmds ? ` · TMDS ≤${hf.tmds} MHz` : "") : "none <small>(HDMI 1.4 sink)</small>"],
-    hf && ["FRL", hf.frl ? `${FRL[hf.frl] || hf.frl} <small>(${FRL_GBPS[hf.frl] || "?"} Gbps)</small>` : "none (TMDS only)"],
-    hf && ["SCDC · scrambling", `${flag(hf.scdc)} ${flag(hf.scramble340, "≤340 MHz scramble", "no low-rate scramble")}`],
-    hf && ["ALLM", flag(hf.allm)],
-    hf && ["VRR", hf.vrrMax ? `${hf.vrrMin}–${hf.vrrMax} Hz` : hf.vrrMin ? `min ${hf.vrrMin} Hz` : "no"],
-    hf && hf.dsc != null && ["DSC", flag(hf.dsc)],
-    hf && ["4:2:0 deep colour", hf.dc420.length ? hf.dc420.map(v => v + "-bit").join(", ") : "none"],
-    e.cta && ["Formats", [flag(e.cta.ycc444, "YCbCr 4:4:4", "no 4:4:4"), flag(e.cta.ycc422, "YCbCr 4:2:2", "no 4:2:2"),
-      e.y420.length || e.y420map ? flag(true, "YCbCr 4:2:0") : ""].join(" ")],
-    e.cta && ["Underscan", flag(e.cta.underscan)],
-  ]);
-  const seen = new Set();
-  const modeTag = m => {
-    const name = VIC[m.vic] || "VIC " + m.vic;
-    return `<span class="tag${m.native ? " native" : ""}" title="VIC ${m.vic}${m.native ? ", native" : ""}${e.y420.includes(m.vic) ? ", 4:2:0 only" : ""}">${esc(name)}</span>`;
-  };
-  const modes = e.modes.filter(m => !seen.has(m.vic) && seen.add(m.vic));
-  const y420only = e.y420.filter(v => !seen.has(v)).map(v => ({ vic: v, native: false }));
-  document.getElementById("dp-modes").innerHTML =
-    (modes.length ? modes.map(modeTag).join("") : '<span class="note">no short video descriptors</span>') +
-    (y420only.length ? `<div class="note" style="margin-top:6px">4:2:0 only</div>` + y420only.map(modeTag).join("") : "") +
-    (e.dtds.length ? `<div class="note" style="margin-top:6px">Detailed timings</div>` +
-      e.dtds.map(t => `<span class="tag" title="${t.mhz.toFixed(2)} MHz">${esc(dtdName(t))}</span>`).join("") : "");
-  const h = e.hdr;
-  kv("dp-hdr", [
-    ["EOTFs", h ? h.eotf.map(x => `<span class="tag on">${esc(x)}</span>`).join("") || "none" : "no HDR block <small>(SDR only)</small>"],
-    h && ["Peak luminance", h.maxL ? h.maxL.toFixed(0) + " cd/m²" : "not given"],
-    h && ["Frame-average", h.avgL ? h.avgL.toFixed(0) + " cd/m²" : "not given"],
-    h && ["Minimum", h.minL ? h.minL.toFixed(3) + " cd/m²" : "not given"],
-    ["Dynamic HDR", [e.hdrDynamic ? "HDR dynamic metadata" : "", ...e.vsvdb].filter(Boolean).map(x => `<span class="tag on">${esc(x)}</span>`).join("") || "none"],
-    ["Colorimetry", e.color.length ? e.color.map(x => `<span class="tag">${esc(x)}</span>`).join("") : "none declared"],
-    e.vcap && ["Quantisation", `${flag(e.vcap.qy, "YCC selectable", "YCC fixed")} ${flag(e.vcap.qs, "RGB selectable", "RGB fixed")}`],
-  ]);
-  document.getElementById("dp-audio").innerHTML =
-    (e.audio.length ? `<table class="log"><tr><th>Format</th><th>Ch</th><th>kHz</th><th></th></tr>` +
-      e.audio.map(a => `<tr><td>${esc(a.fmt)}</td><td>${a.ch}</td><td>${a.rates.join(", ")}</td><td>${esc(a.extra)}</td></tr>`).join("") + `</table>`
-      : `<span class="note">${e.cta && e.cta.basicAudio ? "basic audio only (2-ch LPCM)" : "no audio declared"}</span>`) +
-    (e.speakers.length ? `<div class="note" style="margin-top:8px">Speakers</div>` + e.speakers.map(s => `<span class="tag">${s}</span>`).join("") : "");
-}
-
-let dpBusy = false;
-async function loadDisplay() {
-  if (dpBusy) return;
-  dpBusy = true;
-  try {
-    const r = await fetch("/api/display", { cache: "no-store" });
-    const d = await r.json();
-    if (!d.ok) throw new Error(d.error || "error");
-    renderDisplay(d);
-  } catch (e) {
-    document.getElementById("dp-rc").textContent = "unavailable (" + e.message + "); an older payload has no /api/display";
-  } finally {
-    dpBusy = false;
-  }
-}
-document.getElementById("dp-refresh").onclick = loadDisplay;
-document.getElementById("dp-save").onclick = () => {
-  if (!edidBytes) return;
-  const a = document.createElement("a");
-  a.href = URL.createObjectURL(new Blob([edidBytes], { type: "application/octet-stream" }));
-  a.download = "edid.bin";
-  a.click();
-  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
-};
-// slow readings: hardware every 15 s, the display once (and on Refresh)
-const HW_POLL_MS = 15000;
-setTimeout(() => { loadHardware(); loadDisplay(); setInterval(loadHardware, HW_POLL_MS); }, 600);
 
 // ---- masonry packing of the cards in each .panel ----
 // Each card spans ceil((height + gap) / 2 px) grid rows; a ResizeObserver refits a
