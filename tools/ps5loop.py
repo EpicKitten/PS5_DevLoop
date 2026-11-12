@@ -63,6 +63,7 @@ Commands:
   df                    free space per mounted volume
   led ...               indicator LED: BLUE WHITE AMBER | off | auto | breathe B W A [MS] | chase [MS]
   lightbar R G B        attempt the physical DualSense lightbar (SceShellUI owns the pad)
+  keyboard [open|status|close]   diagnostic: invoke sceImeDialog (it does not render from the payload)
   fan [TEMP]            read the fan duty, or set the threshold (30..90 C)
   beeper [PATTERN|mute 0|1|dim 0..2|status]   beep, mute, set the beeper's dim level
                         (0 full, 1 soft, 2 softest; vol is an alias), or read them
@@ -572,6 +573,11 @@ def main():
     lightbar.add_argument("r", type=int)
     lightbar.add_argument("g", type=int)
     lightbar.add_argument("b", type=int)
+    keyboarding = commands.add_parser("keyboard")
+    keyboarding.add_argument("action", nargs="?", default="status",
+                             choices=["open", "status", "close"])
+    keyboarding.add_argument("spec", nargs="*",
+                             help="for open: TITLE[|PLACEHOLDER[|TEXT]]")
     fanning = commands.add_parser("fan")
     fanning.add_argument("temp", nargs="?", help="omit to read; a number to set the threshold (30..90)")
     commands.add_parser("beeper").add_argument("args", nargs="*", help="[PATTERN] | mute 0|1 | dim 0..2 (0 full, 2 softest) | status")
@@ -706,6 +712,9 @@ def main():
         return say(command("led " + " ".join(args.args))[0])
     if args.command == "lightbar":
         return say(command(f"lightbar {args.r} {args.g} {args.b}")[0])
+    if args.command == "keyboard":
+        spec = " ".join(args.spec)
+        return say(command(f"keyboard {args.action}" + (f" {spec}" if spec else ""))[0])
     if args.command == "fan":
         return say(command(f"fan set {args.temp}" if args.temp else "fan")[0])
     if args.command == "beeper":

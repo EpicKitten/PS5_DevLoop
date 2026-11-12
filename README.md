@@ -174,6 +174,15 @@ Notes and limits:
   `0x809b0081` (ALREADY_OPENED): SceShellUI owns the pad, so the payload cannot
   set its lightbar/haptics. The console's own body LED (`led`, via
   `/dev/icc_indicator`) is separate and does work.
+- **`keyboard [open|status|close]`** is a diagnostic in the same spirit: it
+  invokes the system on-screen keyboard (`sceImeDialog`) from the payload. On
+  12.20 `sceImeDialogInit` succeeds (`result=0`, status RUNNING) but the dialog
+  never draws — a modal CommonDialog renders into the *calling* app's framebuffer
+  and must be pumped from its render loop, which a background payload does not
+  have. (Borrowing the foreground app's identity with `sceKernelSetAppInfo` is
+  attempted too; it fails `0x80020010` and would not help regardless.) To put
+  text into a field, use the dashboard's **Type** box, which steers the game's
+  own keyboard key by key.
 - **`settings`** reads the registry by scanning regIds (`(cat << 24) | (sub <<
   16) | entry`) with `sceRegMgrGetInt`/`GetStr`, keyed by regId in hex. It
   covers the readable int and string values across every category; binary

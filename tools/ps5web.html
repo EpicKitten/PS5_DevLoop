@@ -533,6 +533,9 @@
         <input type="range" id="kb-speed" min="0" max="100" value="50" aria-describedby="kb-speed-val">
         <b id="kb-speed-val"></b></div>
       <div class="hint" style="margin-bottom:0">Enter in the field types it (Enter again stops). Steers the keyboard's highlight key by key. Faster settings can drop presses if the console lags; slow down if letters go missing. It expects a keyboard that has just opened (highlight on G) with the English layout. Letters, digits, space and common symbols; no ~ or accents.</div>
+      <div class="row" style="margin-top:14px"><label>Keyboard</label>
+        <button title="Diagnostic (like Lightbar): invoke the system on-screen keyboard from the payload. sceImeDialogInit succeeds but it does not render — proof a modal dialog cannot be shown from a background payload" class="go" id="kb-invoke" onclick="probeKeyboard()">Probe keyboard dialog</button></div>
+      <div class="hint" style="margin-bottom:0">A diagnostic, not a control. It invokes <code>sceImeDialog</code> from the payload: the call succeeds (status RUNNING) but nothing draws, because a modal CommonDialog renders into the calling app's framebuffer, which a background payload lacks. To put text into a field, use the Type box above (it steers the game's own keyboard).</div>
     </div>
 
     <!-- sight -->
@@ -1720,6 +1723,36 @@ async function typeText() {
     logLine("  → typing " + e.message, "err");
   } finally {
     btn.dataset.busy = "0"; btn.textContent = "Type";
+  }
+}
+
+// ---- keyboard dialog diagnostic ----
+// Like the Lightbar probe: invoke sceImeDialog from the payload, show that it
+// initialises but does not render, then tear it down. "keyboard open" starts the
+// dialog and reports result/host/borrow; "keyboard status" reports RUNNING;
+// "keyboard close" aborts and terms it.
+let keyboardProbing = false;
+async function probeKeyboard() {
+  if (keyboardProbing) return;
+  const ask = async cmd => (await (await fetch("/api/run?c=" + encodeURIComponent(cmd), { cache: "no-store" })).text()).trim();
+  const btn = document.getElementById("kb-invoke");
+  keyboardProbing = true; btn.disabled = true;
+  logLine("» keyboard probe (invoke sceImeDialog from the payload)", "cmd");
+  try {
+    const opened = await ask("keyboard open DevLoop keyboard probe");
+    logLine("  open: " + opened, /^ok\b/.test(opened) ? "ok" : "err");
+    if (!/^ok\b/.test(opened)) return;
+    await new Promise(done => setTimeout(done, 700));
+    const status = await ask("keyboard status");
+    logLine("  status: " + status, "ok");
+    logLine("  → sceImeDialogInit succeeded but the dialog does not render: a modal " +
+            "dialog needs the calling app's framebuffer, which a background payload lacks.", "ok");
+    const closed = await ask("keyboard close");
+    logLine("  close: " + closed, /^ok\b/.test(closed) ? "ok" : "err");
+  } catch (e) {
+    logLine("  → keyboard probe failed: " + e.message, "err");
+  } finally {
+    keyboardProbing = false; btn.disabled = false;
   }
 }
 

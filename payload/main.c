@@ -3759,6 +3759,270 @@ static void lightbar_try(int client, int r, int g, int b)
           set == 0 ? "ok" : "err", handle, (uint32_t)set, r, g, b);
 }
 
+// keyboard: a diagnostic, like `lightbar`. It invokes the system's on-screen
+// keyboard (libSceImeDialog) from the payload itself, and demonstrates directly
+// that a modal CommonDialog cannot be shown from a background payload rather than
+// only asserting it. `sceImeDialogInit` succeeds (result=0, status RUNNING) but
+// the dialog never draws: a CommonDialog renders into the *calling* process's
+// framebuffer and must be pumped from its render loop, and this payload has no
+// video context. Borrowing the foreground app's identity (sceKernelSetAppInfo)
+// is attempted and reported too; it fails (0x80020010) and would not help, since
+// the missing piece is the render loop, not the app id. The command still works
+// as an async probe: "open" starts the dialog, "status" reports RUNNING (and, if
+// a firmware ever rendered it, the entered text once done), "close" tears it
+// down. Text is UTF-16 on the console and UTF-8 on the wire. The real path to put
+// text into a field is the pad-steering typist in the dashboard (tools/ps5web.html).
+#define KEYBOARD_MAX_TEXT 512
+
+typedef struct
+{
+    int32_t user_id;
+    int32_t type; // 0 = default, 1 = basic latin, 2 = URL, 3 = mail, 4 = number
+    uint64_t supported_languages;
+    int32_t enter_label;
+    int32_t input_method;
+    void *filter;
+    uint32_t option;
+    uint32_t max_text_length;
+    uint16_t *input_text_buffer;
+    float pos_x;
+    float pos_y;
+    int32_t horizontal_alignment;
+    int32_t vertical_alignment;
+    const uint16_t *placeholder;
+    const uint16_t *title;
+    int8_t reserved[16];
+} ime_dialog_param_t;
+
+typedef struct
+{
+    int32_t end_status; // 0 = OK, 1 = cancelled by the person, 2 = aborted
+    int8_t reserved[12];
+} ime_dialog_result_t;
+
+int sceImeDialogInit(const ime_dialog_param_t *param, const void *extended);
+int sceImeDialogGetStatus(void);
+int sceImeDialogGetResult(ime_dialog_result_t *result);
+int sceImeDialogAbort(void);
+int sceImeDialogTerm(void);
+
+int sceKernelSetAppInfo(pid_t pid, app_info_t *info);
+
+// The system draws the keyboard over the app that asked for it, and this payload
+// is no app (its app id is 0), so a dialog it opens as itself runs but is never
+// shown. While the keyboard is up the payload therefore carries the app info of
+// what is in the foreground: the running title, or SceShellUI on the home screen.
+static app_info_t g_keyboard_own_info;
+static bool g_keyboard_borrowed;
+
+static bool keyboard_host_info(app_info_t *out, int *host_pid)
+{
+    const int big = sceSystemServiceGetAppIdOfRunningBigApp();
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PROC, 0};
+    size_t len = 0;
+    bool found = false;
+    if (sysctl(mib, 4, NULL, &len, NULL, 0) != 0)
+        return false;
+    char *const procs = malloc(len);
+    if (procs != NULL && sysctl(mib, 4, procs, &len, NULL, 0) == 0)
+    {
+        for (char *ptr = procs; !found && ptr + sizeof(struct kinfo_proc) <= procs + len;)
+        {
+            const struct kinfo_proc *const ki = (const struct kinfo_proc *)ptr;
+            if (ki->ki_structsize == 0)
+                break;
+            ptr += ki->ki_structsize;
+            app_info_t info;
+            if (ki->ki_pid == getpid() || sceKernelGetAppInfo(ki->ki_pid, &info) != 0)
+                continue;
+            if (big > 0 ? info.app_id == (uint32_t)big : strcmp(ki->ki_comm, "SceShellUI") == 0)
+            {
+                *out = info;
+                *host_pid = ki->ki_pid;
+                found = true;
+            }
+        }
+    }
+    free(procs);
+    return found;
+}
+
+static void keyboard_return_info(void)
+{
+    if (g_keyboard_borrowed)
+        (void)sceKernelSetAppInfo(getpid(), &g_keyboard_own_info);
+    g_keyboard_borrowed = false;
+}
+
+static uint16_t g_keyboard_text[KEYBOARD_MAX_TEXT + 1];
+static uint16_t g_keyboard_title[128];
+static uint16_t g_keyboard_placeholder[128];
+static bool g_keyboard_open;
+
+// UTF-8 to UTF-16 (characters beyond the BMP become surrogate pairs).
+static void utf8_to_utf16(uint16_t *out, size_t count, const char *in)
+{
+    size_t j = 0;
+    const unsigned char *s = (const unsigned char *)(in != NULL ? in : "");
+    while (*s != '\0' && j + 2 < count)
+    {
+        uint32_t c = *s++;
+        int more = c >= 0xf0 ? 3 : c >= 0xe0 ? 2 : c >= 0xc0 ? 1 : 0;
+        if (more > 0)
+            c &= 0x3fu >> more;
+        for (; more > 0 && (*s & 0xc0) == 0x80; more--)
+            c = (c << 6) | (*s++ & 0x3fu);
+        if (c >= 0x10000)
+        {
+            c -= 0x10000;
+            out[j++] = (uint16_t)(0xd800 | (c >> 10));
+            c = 0xdc00 | (c & 0x3ff);
+        }
+        out[j++] = (uint16_t)c;
+    }
+    out[j] = 0;
+}
+
+// UTF-16 to UTF-8; control characters become spaces, so the reply stays one line.
+static void utf16_to_utf8(char *out, size_t size, const uint16_t *in)
+{
+    size_t j = 0;
+    for (size_t i = 0; in[i] != 0 && j + 5 < size; i++)
+    {
+        uint32_t c = in[i];
+        if (c >= 0xd800 && c < 0xdc00 && in[i + 1] >= 0xdc00 && in[i + 1] < 0xe000)
+            c = 0x10000 + ((c - 0xd800) << 10) + (in[++i] - 0xdc00);
+        if (c < 0x20)
+            c = ' ';
+        if (c < 0x80)
+            out[j++] = (char)c;
+        else if (c < 0x800)
+        {
+            out[j++] = (char)(0xc0 | (c >> 6));
+            out[j++] = (char)(0x80 | (c & 0x3f));
+        }
+        else if (c < 0x10000)
+        {
+            out[j++] = (char)(0xe0 | (c >> 12));
+            out[j++] = (char)(0x80 | ((c >> 6) & 0x3f));
+            out[j++] = (char)(0x80 | (c & 0x3f));
+        }
+        else
+        {
+            out[j++] = (char)(0xf0 | (c >> 18));
+            out[j++] = (char)(0x80 | ((c >> 12) & 0x3f));
+            out[j++] = (char)(0x80 | ((c >> 6) & 0x3f));
+            out[j++] = (char)(0x80 | (c & 0x3f));
+        }
+    }
+    out[j] = '\0';
+}
+
+// keyboard open [TITLE[|PLACEHOLDER[|TEXT]]]
+static void keyboard_open(int client, char *spec)
+{
+    if (g_keyboard_open && sceImeDialogGetStatus() == 1)
+    {
+        reply(client, "err keyboard: already open (keyboard status, or keyboard close)");
+        return;
+    }
+    if (g_keyboard_open)
+        (void)sceImeDialogTerm();
+    g_keyboard_open = false;
+
+    char *placeholder = spec != NULL ? strchr(spec, '|') : NULL;
+    char *text = NULL;
+    if (placeholder != NULL)
+    {
+        *placeholder++ = '\0';
+        text = strchr(placeholder, '|');
+        if (text != NULL)
+            *text++ = '\0';
+    }
+    utf8_to_utf16(g_keyboard_title, sizeof(g_keyboard_title) / sizeof(g_keyboard_title[0]),
+                  spec != NULL && *spec != '\0' ? spec : "DevLoop");
+    utf8_to_utf16(g_keyboard_placeholder,
+                  sizeof(g_keyboard_placeholder) / sizeof(g_keyboard_placeholder[0]), placeholder);
+    utf8_to_utf16(g_keyboard_text, sizeof(g_keyboard_text) / sizeof(g_keyboard_text[0]), text);
+
+    ime_dialog_param_t param;
+    memset(&param, 0, sizeof(param));
+    int user = -1;
+    (void)sceUserServiceGetForegroundUser(&user);
+    param.user_id = user;
+    param.max_text_length = KEYBOARD_MAX_TEXT;
+    param.input_text_buffer = g_keyboard_text;
+    param.pos_x = 960.0f; // the middle of a 1920x1080 screen
+    param.pos_y = 540.0f;
+    param.horizontal_alignment = 1; // centre
+    param.vertical_alignment = 1;
+    param.placeholder = g_keyboard_placeholder;
+    param.title = g_keyboard_title;
+
+    ensure_elevated();
+    app_info_t host;
+    int host_pid = -1, borrow = -1;
+    keyboard_return_info();
+    if (keyboard_host_info(&host, &host_pid) && sceKernelGetAppInfo(getpid(), &g_keyboard_own_info) == 0)
+    {
+        borrow = sceKernelSetAppInfo(getpid(), &host);
+        g_keyboard_borrowed = borrow == 0;
+    }
+
+    const int result = sceImeDialogInit(&param, NULL);
+    g_keyboard_open = result == 0;
+    if (!g_keyboard_open)
+        keyboard_return_info();
+    reply(client, "%s keyboard open result=0x%08x user=0x%08x status=%d host=%d appId=0x%x borrow=0x%08x",
+          result == 0 ? "ok" : "err", (uint32_t)result, (uint32_t)user, sceImeDialogGetStatus(),
+          host_pid, host_pid >= 0 ? host.app_id : 0, (uint32_t)borrow);
+}
+
+// keyboard status: "running" while it is up; once it is finished, how it ended
+// and the text, and the dialog is released.
+static void keyboard_status(int client)
+{
+    const int status = sceImeDialogGetStatus();
+    if (!g_keyboard_open || status == 0)
+    {
+        reply(client, "ok keyboard closed");
+        return;
+    }
+    if (status == 1)
+    {
+        reply(client, "ok keyboard running");
+        return;
+    }
+    ime_dialog_result_t result;
+    memset(&result, 0, sizeof(result));
+    const int got = sceImeDialogGetResult(&result);
+    (void)sceImeDialogTerm();
+    g_keyboard_open = false;
+    keyboard_return_info();
+    char text[PS5LOOP_LINE - 128];
+    utf16_to_utf8(text, sizeof(text), g_keyboard_text);
+    reply(client, "%s keyboard done end=%s text=%s", got == 0 ? "ok" : "err",
+          got != 0 ? "unknown" : result.end_status == 0 ? "entered"
+                             : result.end_status == 1   ? "cancelled"
+                                                        : "aborted",
+          text);
+}
+
+static void keyboard_close(int client)
+{
+    if (!g_keyboard_open)
+    {
+        reply(client, "ok keyboard closed");
+        return;
+    }
+    const int aborted = sceImeDialogGetStatus() == 1 ? sceImeDialogAbort() : 0;
+    const int term = sceImeDialogTerm();
+    g_keyboard_open = false;
+    keyboard_return_info();
+    reply(client, "%s keyboard close abort=0x%08x term=0x%08x", term == 0 ? "ok" : "err",
+          (uint32_t)aborted, (uint32_t)term);
+}
+
 static int handle_command(int client, char *line, const char *body, size_t body_len)
 {
     char report[PS5LOOP_LINE - 64] = {0};
@@ -4127,6 +4391,22 @@ static int handle_command(int client, char *line, const char *body, size_t body_
             reply(client, "err usage: lightbar R G B (attempts the physical pad)");
         else
             lightbar_try(client, atoi(r), atoi(g), atoi(b));
+        return 0;
+    }
+    if (strcmp(command, "keyboard") == 0)
+    {
+        const char *const sub = strtok(NULL, " \t");
+        char *spec = strtok(NULL, "");
+        while (spec != NULL && (*spec == ' ' || *spec == '\t'))
+            spec++;
+        if (sub == NULL || strcmp(sub, "status") == 0)
+            keyboard_status(client);
+        else if (strcmp(sub, "open") == 0)
+            keyboard_open(client, spec);
+        else if (strcmp(sub, "close") == 0)
+            keyboard_close(client);
+        else
+            reply(client, "err usage: keyboard open [TITLE[|PLACEHOLDER[|TEXT]]] | status | close");
         return 0;
     }
     if (strcmp(command, "led") == 0)

@@ -90,8 +90,15 @@ would mean a dedicated SceShellUI-bridge project, out of scope for this roadmap.
 - **Modal dialogs** — `sceMsgDialog` / `sceErrorDialog` / `sceImeDialog` are
   CommonDialog dialogs that draw into the *calling* process's framebuffer and
   must be pumped from its render loop; a background payload has no video context,
-  so there is nothing to draw into. (System-drawn `notify` toast/flyout, which do
-  not need a render loop, already work.)
+  so there is nothing to draw into. The `keyboard` command makes this concrete
+  rather than asserted, as `lightbar` does for the pad: it links `libSceImeDialog`
+  and calls `sceImeDialogInit`, which succeeds (`result=0`, `sceImeDialogGetStatus`
+  RUNNING) on 12.20 — yet a screenshot shows only the foreground title, never the
+  keyboard. Borrowing the foreground app's identity (`sceKernelSetAppInfo` to the
+  running big-app's `app_info_t`) was tried to get the shell to composite it; the
+  set fails `0x80020010`, and the real gap is the render loop, not the app id.
+  (System-drawn `notify` toast/flyout, which do not need a render loop, already
+  work.)
 - **Live video / framebuffer** — continuous capture to drop the capture-card
   dependency. Reading the *composited* display output from a payload has no
   exposed API (no avcapture stub; `SceAvCapture` is a separate privileged
@@ -129,9 +136,13 @@ exists, which it now is).
 - **Demonstrated impossible on hardware (12.20):** `lightbar` initialised scePad
   (`init=0`) and then `scePadOpen` returned `0x809b0081` (ALREADY_OPENED) for the
   foreground user — concrete proof the physical pad is shell-owned, so the pad
-  lightbar/haptics cannot be driven from the payload. The remaining two limits
-  (modal dialogs, live framebuffer) have no API that can even be invoked from a
-  background payload to attempt — a missing subsystem, not a refused call.
+  lightbar/haptics cannot be driven from the payload. `keyboard` makes the modal-
+  dialog limit concrete the same way: `sceImeDialogInit` returns `result=0` and
+  `sceImeDialogGetStatus` reports RUNNING, yet a screenshot shows only the
+  foreground title — the dialog initialises but has no framebuffer to draw into
+  (the `sceKernelSetAppInfo` identity-borrow fails `0x80020010`). The last limit,
+  live framebuffer, has no API that can even be invoked from a background payload
+  to attempt — a missing subsystem, not a refused call.
 - **Confirmed by code, not run live** (running them would disturb a live title or
   cut access): write-verify readback for `poke` / `kern-write` / `setting-set`
   (each reports `verify=ok|mismatch`), and rest/resume survival (the accept loop
